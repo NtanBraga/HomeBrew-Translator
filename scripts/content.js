@@ -1,5 +1,88 @@
 import Tesseract from "tesseract.js";
 
+//overlay que acompanha a imagem apos redimencionamento
+
+
+const imageOverlay = new Map()
+
+function updateOverlayPosition(imgElement, overlay){
+    const rect = imgElement.getBoundingClientRect()
+
+    overlay.style.left = `${rect.left}px`
+    overlay.style.top = `${rect.top}px`
+    overlay.style.width = `${rect.width}px`
+    overlay.style.height = `${rect.height}px`
+
+    const visible = rect.bottom > 0 && 
+        rect.right > 0 &&
+        rect.top < window.innerHeight &&
+        rect.left < window.innerWidth 
+
+    overlay.style.display = visible ? "block" : "none"
+    
+}
+
+function removeImageOverlay(imgElement) {
+    const data = imageOverlay.get(imgElement)
+
+    if(!data) return
+
+    data.resizeObserver.disconnect()
+
+    window.removeEventListener("scroll", data.updatePosition, true)
+
+    window.removeEventListener("resize", data.updatePosition)
+
+    data.overlay.remove()
+
+    imageOverlay.delete(imgElement)
+}
+
+function createImageOverlay(imgElement){
+    removeImageOverlay(imgElement)
+
+    const overlay = document.createElement("div")
+
+    overlay.className = "ocr-translation-overlay"
+
+    overlay.style.cssText = `
+        position: fixed !important;
+        z-index: 201 !important;
+        pointer-events: none !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        border: none !important;
+        box-sizing: border-box !important;
+    `
+
+    document.body.appendChild(overlay)
+
+    updateOverlayPosition(imgElement, overlay)
+
+    const resizeObserver = new ResizeObserver(() => {
+        updateOverlayPosition(imgElement, overlay)
+    })
+
+    resizeObserver.observe(imgElement)
+
+    const updatePosition = () => {
+        updateOverlayPosition(imgElement, overlay)
+    }
+
+    window.addEventListener("scroll", updatePosition, true)
+    window.addEventListener("resize", updatePosition)
+
+    imageOverlay.set(imgElement,{overlay, resizeObserver, updatePosition})
+
+    return overlay
+}
+
+function removeAllTranslationOverlays(){
+    for(const imgElement of imageOverlay.keys()){
+        removeImageOverlay(imgElement)
+    }
+}
+
 //Obj: deixar o algoritmo decidir o modo do OCR com base 
 // nos calculos de geometria da posição das palavras na foto
 // podendo ter a certeza de ser documento ou manga
@@ -27,6 +110,76 @@ const CJK_LANGUAGES = new Set([
     "chi_tra",
     "chi_tra_vert"
 ])
+//pontuações com caracteres CJK
+const CJK_PUNCTUATION = new Set([
+    "。",
+    "、",
+    "！",
+    "？",
+    "「",
+    "」",
+    "『",
+    "』",
+    "…",
+    "ー",
+    "〜",
+    "～"
+])
+
+function isProbablyOCRNoise(word,selectedLang){
+    const text = word.text?.trim() || ""
+    const confidence = Number(word.confidence) || 0
+
+    if(!text) return true
+
+
+    if(confidence < 10) return true
+
+    const cjk = isCJKLanguage(selectedLang)
+
+    const hasLetterOrNumber = /[\p{L}\p{N}]/u.test(text)
+
+    const onlySymbols = /^[\p{P}\p{S}_]+$/u.test(text)
+    
+    if(cjk){
+        if(CJK_PUNCTUATION.has(text)) return false
+        
+        if(onlySymbols && confidence < 55) return true
+
+        return false
+    }
+
+    if(onlySymbols && confidence < 85) return true
+    if(!hasLetterOrNumber && confidence < 90) return true
+
+    const symbols = text.match(/[\p{P}\p{S}_]/gu) || []
+
+    const symbolRatio = symbols.length / Math.max(text.length, 1)
+
+    if(text.length <= 4 && symbolRatio >= 0.5 && confidence < 75) return true
+
+    const suspeciousShortCode = /^[A-Za-z]\d{1,3}$/.test(text)
+
+    if(suspeciousShortCode && confidence < 45) return true
+
+    return false
+}
+
+function isProbablyNoiseRegion(region, selectedLang){
+    if(isCJKLanguage(selectedLang)) return false
+
+    const text = region.text.trim()
+
+    if(!text) return true
+
+    if(text.length <= 4 && region.confidence < 35) return true
+
+    const hasLetterOrNumber = /[\p{L}\p{N}]/u.test(text)
+
+    if(!hasLetterOrNumber && region.confidence < 85) return true
+
+    return false
+}
 
 function getOCRLanguages(selectedLang){
     if(selectedLang.endsWith("_vert")){
@@ -73,7 +226,8 @@ function inspectSparseMode(ocrData, imageWidth, imageHeight){
 async function recognizeWorker(worker, imageTarget, psm) {
 
     await worker.setParameters({
-        tessedit_pageseg_mode: psm
+        tessedit_pageseg_mode: psm,
+        user_defined_dpi: "300"
     })
 
     const response = await worker.recognize(
@@ -124,7 +278,7 @@ async function readImage(imageTarget, selectedLang, mode = OCR_MODE.AUTO){
     }
 }
 
-function extractOCRWords(ocrData){
+function extractOCRWords(ocrData, selectedLang){
     if(!ocrData.tsv) return []
 
     const rows = ocrData.tsv.trim().split('\n').map(row => row.split('\t'))
@@ -164,7 +318,7 @@ function extractOCRWords(ocrData){
         const h = Number(height)
         const conf = Number(confidence)
 
-        words.push({
+        const word = {
             text,
             confidence: Number.isFinite(conf) ? conf : 0,
             pageNum: Number(pageNum),
@@ -178,7 +332,15 @@ function extractOCRWords(ocrData){
                 x1: x + w,
                 y1: y + h
             }  
-        })
+        }
+
+        if(isProbablyOCRNoise(word, selectedLang)){
+            console.log("OCR Noise Removed: ", {
+                text: word.text, confidence: word.confidence
+            })
+            return
+        }
+        words.push(word)
     })
     return words
 }
@@ -243,6 +405,36 @@ function detectLineOrientation(words,bbox,selectedLang){
     return "horizontal"
 }
 
+function splitHorizontalWordsByGap(words) {
+    if(words.length <= 1) return [words]
+
+    const ordered = [...words].sort((a,b) => a.bbox.x0 - b.bbox.x0)
+    const heights = ordered.map(word => bboxHeight(word.bbox))
+    const averageHeight = averageBbox(heights)
+    const maxGap = Math.max(averageHeight * 2.2, 18)
+    const groups = []
+
+    let currentGroup = [ordered[0]]
+
+    for(let i = 1; i < ordered.length; i++){
+        const previous = ordered[i - 1]
+        const current = ordered[i]
+        const gap = current.bbox.x0 - previous.bbox.x1
+        if(gap > maxGap) {
+            groups.push(currentGroup)
+            currentGroup = [current]
+        }else{
+            currentGroup.push(current)
+        }
+    }
+
+    if(currentGroup.length){
+        groups.push(currentGroup)
+    }
+
+    return groups
+}
+
 function buildOCRLines(words, selectedLang){
     const lineMap = new Map()
 
@@ -262,35 +454,44 @@ function buildOCRLines(words, selectedLang){
     })
     const lines = []
 
-    lineMap.forEach((lineWords, key) => {
-        const bbox = calculateBoundingBox(lineWords)
-        const orientation = detectLineOrientation(lineWords, bbox, selectedLang)
+    lineMap.forEach((tesseractWords, key) => {
+        const originalBbox = calculateBoundingBox(tesseractWords)
+        const orientation = detectLineOrientation(tesseractWords, originalBbox, selectedLang)
 
-        lineWords.sort((a,b) => {
-            if(orientation === "vertical"){
-                return (a.bbox.y0 - b.bbox.y0)
-            }
-            return (a.bbox.x0 - b.bbox.x0)
-        })
+        const wordGroups = orientation === "horizontal" 
+            ? splitHorizontalWordsByGap(tesseractWords) : [tesseractWords]
 
-        const separator = orientation === "vertical" && 
+        wordGroups.forEach((lineWords, groupIndex) => {
+            const bbox = calculateBoundingBox(lineWords)
+            const finalOrientation = detectLineOrientation(lineWords, bbox, selectedLang)
+            
+            lineWords.sort((a, b) => {
+                if(finalOrientation === "vertical") return (a.bbox.y0 - b.bbox.y0)
+
+
+                return (a.bbox.x0 - b.bbox.x0)
+            })
+
+            const separator = finalOrientation === "vertical" && 
             isCJKLanguage(selectedLang) ? "" : " "
 
-        const text = lineWords.map(word => word.text).join(separator)
-        const confidence = averageBbox(lineWords.map(word => word.confidence))
+            const text = lineWords.map(word => word.text).join(separator)
+            const confidence = averageBbox(lineWords.map(word => word.confidence))
 
-        lines.push({
-            id: key,
-            text,
-            words: lineWords,
-            confidence,
-            orientation,
-            bbox,
-            pageNum: lineWords[0].pageNum,
-            blockNum: lineWords[0].blockNum,
-            parNum: lineWords[0].parNum,
-            lineNum: lineWords[0].lineNum
+            lines.push({
+                id: `${key}-${groupIndex}`,
+                text,
+                words: lineWords,
+                confidence,
+                orientation: finalOrientation,
+                bbox,
+                pageNum: lineWords[0].pageNum,
+                blockNum: lineWords[0].blockNum,
+                parNum: lineWords[0].parNum,
+                lineNum: lineWords[0].lineNum
+            })
         })
+
     })
     return lines
 }
@@ -341,12 +542,18 @@ function canMergeLineIntoRegion(region,line){
     if(line.orientation === "horizontal"){
         const verticalGap = axisGap(regionBox.y0, regionBox.y1, lineBox.y0, lineBox.y1)
         const horizontalOverlap = overlapRatio(regionBox.x0, regionBox.x1, lineBox.x0, lineBox.x1)
+        const verticalOverlap = overlapRatio(regionBox.y0, regionBox.y1, lineBox.y0, lineBox.y1)
         const centerDifference = Math.abs(bboxCenterX(regionBox) - bboxCenterX(lineBox))
         const maxWidth = Math.max(bboxWidth(regionBox),bboxWidth(lineBox))
         const maxGap = Math.max(regionThickness, lineThickness) * 1.7
 
+        const sameRow = verticalOverlap > 0.60
+        const separatedHorizontally = horizontalOverlap < 0.10
+
+        if(sameRow && separatedHorizontally) return false
+
         return (verticalGap <= maxGap && 
-            (horizontalOverlap > 0.15 || centerDifference < maxWidth * 0.40))
+            (horizontalOverlap > 0.20 || centerDifference < maxWidth * 0.25))
     }
 
     const horizontalGap = axisGap(regionBox.x0, regionBox.x1, lineBox.x0, lineBox.x1)
@@ -432,7 +639,7 @@ function buildTextRegions(lines, selectedLang){
 }
 
 function buildOCRStructure(ocrData, selectedLang){
-    const words = extractOCRWords(ocrData)
+    const words = extractOCRWords(ocrData, selectedLang)
     const lines = buildOCRLines(words, selectedLang)
     const regions = buildTextRegions(lines, selectedLang)
 
@@ -440,10 +647,7 @@ function buildOCRStructure(ocrData, selectedLang){
 }
 
 function drawTranslationBlocks(ocrData, imgElement, selectedLang){
-    const rect = imgElement.getBoundingClientRect()
 
-    const scaleX = imgElement.naturalWidth ? (rect.width / imgElement.naturalWidth) : 1;
-    const scaleY = imgElement.naturalHeight ? (rect.height / imgElement.naturalHeight) : 1;
 
     const {words, lines, regions} = buildOCRStructure(ocrData, selectedLang)
 
@@ -456,16 +660,32 @@ function drawTranslationBlocks(ocrData, imgElement, selectedLang){
         return
     }
 
+    const naturalWidth = imgElement.naturalWidth
+    const naturalHeight = imgElement.naturalHeight
+
+    if(!naturalWidth || !naturalHeight) {
+        console.warn("No natural image dimentions") 
+        return
+    }
+
+    const overlay = createImageOverlay(imgElement)
+
     regions.forEach((region, index) => {
+
+        if(isProbablyNoiseRegion(region, selectedLang)){
+            console.log("OCR region removed as noise:", region)
+            return
+        }
+
         const originalText = region.text.trim();
 
         if(!originalText || originalText.length < 2) return;
 
         const bbox = region.bbox
-        const leftBox = (bbox.x0 * scaleX)
-        const topBox = (bbox.y0 * scaleY)
-        const widthBox = ((bbox.x1 - bbox.x0) * scaleX)
-        const heightBox = ((bbox.y1 - bbox.y0) * scaleY)
+        const leftBox = (bbox.x0 / naturalWidth) * 100
+        const topBox = (bbox.y0 / naturalHeight) * 100
+        const widthBox = ((bbox.x1 - bbox.x0) / naturalWidth) * 100
+        const heightBox = ((bbox.y1 - bbox.y0) / naturalHeight) * 100
 
         console.log(`Region ${index}: `, 
             {   text: originalText, 
@@ -487,29 +707,31 @@ function drawTranslationBlocks(ocrData, imgElement, selectedLang){
         balon.style.cssText = `
             position: absolute !important;
             z-index: 200 !important;
-            left: ${rect.left + window.scrollX + leftBox}px !important;
-            top: ${rect.top + window.scrollY + topBox}px !important;
-            width: ${widthBox}px !important;
-            height: ${heightBox}px !important;
+            left: ${leftBox}% !important;
+            top: ${topBox}% !important;
+            width: ${widthBox}% !important;
+            height: ${heightBox}% !important;
             background-color: white !important;
-            color: black;
-            border-radius: 6px;
-            padding: 4px;
-            box-sizing: border-box;
-            font-family: sans-serif;
+            color: black !important;
+            border-radius: 6px !important;
+            padding: 4px !important;
+            margin: 0 !important;
+            box-sizing: border-box !important;
+            font-family: sans-serif !important;
             font-size: 12px !important;
-            overflow: hidden;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            white-space: normal;
-            pointer-events: none;
+            overflow: hidden !important;
+            line-height: 1.05 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            text-align: center !important;
+            white-space: normal !important;
+            pointer-events: none !important; 
         `
 
         balon.innerText = originalText
 
-        document.body.appendChild(balon)
+        overlay.appendChild(balon)
     })
 }
 
@@ -591,6 +813,22 @@ function setupImageHover() {
                     translationBtn.innerText = 'Traduzir';
                 }, 2000)
             })
+        })
+
+        chrome.storage.onChanged.addListener((changes, areaName) => {
+            if(areaName !== "local") return
+            if(!changes.translationActive) return
+
+            const active = changes.translationActive.newValue
+
+                if(!active) {
+                    removeAllTranslationOverlays()
+
+                    translationBtn.style.display = "none"
+
+                    currentImage = null
+                }
+            
         })
 }
 
