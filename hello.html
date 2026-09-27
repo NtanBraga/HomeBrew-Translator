@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Homebrew Translator</title>
+    <link rel="stylesheet" href="./assets/sheets/hello.css">
+    <script src="./scripts/hello.js" defer></script>
+</head>
+<body>
+    <header>
+        <div class="header-img">
+            <img src="icons/48.png">
+            <span>Homebrew-Translator</span>
+        </div>
+    </header>
+    <hr>
+    <main>
+        <div class="selection">
+            <div class="input-group">
+                <span>Translate: </span>
+                <div class="slide-checkbox">
+                    <label class="switch">
+                        <input type="checkbox">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+            </div>
+            <form class="input-group">
+                <label>Translate from</label>
+                <select name="translate-from" id="translate-from">
+                    <!--Tesseract apenas aceita codigos value designado por eles-->
+                    <option value="jpn">Japanese</option>
+                    <option value="kor">Korean</option>
+                    <option value="chi_tra">Chinese Tradicional</option>
+                    <option value="chi_sim">Chinese Simplified</option>
+                </select>
+            </form>
+            <form class="input-group">
+                <label>Translate to</label>
+                <select name="translate-to" id="translate-to">
+                    <option value="english">English</option>
+                    <option value="portuguese">Portuguese</option>
+                </select>
+            </form>
+        </div>
+    </main>
+</body>
+</html>

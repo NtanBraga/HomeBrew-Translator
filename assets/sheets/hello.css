@@ -1,0 +1,86 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  padding: 10px;
+}
+body header span {
+  font-size: 20px;
+  font-weight: 200;
+}
+body main .selection {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  padding: 16px;
+}
+body main .selection .input-group {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+body main .selection .input-group select {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid black;
+  background-color: white;
+  cursor: pointer;
+  min-width: 140px;
+}
+body main .selection .input-group select:focus {
+  outline: none;
+  border-color: #007bff;
+}
+body main .selection .input-group .slide-checkbox .switch {
+  position: relative;
+  display: inline-block;
+  width: 50px;
+  height: 28px;
+}
+body main .selection .input-group .slide-checkbox input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+body main .selection .input-group .slide-checkbox input:checked + .slider {
+  background-color: #2196f3;
+}
+body main .selection .input-group .slide-checkbox input:focus + .slider {
+  box-shadow: 0 0 1px #2196f3;
+}
+body main .selection .input-group .slide-checkbox input:checked + .slider:before {
+  -webkit-transform: translateX(22px);
+  -ms-transform: translateX(22px);
+  transform: translateX(22px);
+}
+body main .selection .input-group .slide-checkbox .slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgb(53, 52, 52);
+  border-radius: 34px;
+  -webkit-transition: 0.4s;
+  transition: 0.4s;
+}
+body main .selection .input-group .slide-checkbox .slider::before {
+  position: absolute;
+  content: "";
+  height: 20px;
+  width: 20px;
+  left: 4px;
+  bottom: 4px;
+  border-radius: 50%;
+  background-color: white;
+  -webkit-transition: 0.4s;
+  transition: 0.4s;
+}
+
+/*# sourceMappingURL=hello.css.map */

@@ -1,0 +1,22 @@
+{
+  "name": "homebrew-translator",
+  "version": "1.0.0",
+  "description": "",
+  "main": "background.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "watch": "webpack --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "webpack-cli": "^7.2.3"
+  },
+  "allowScripts": {
+    "tesseract.js@7.0.0": true
+  }
+}
