@@ -15,5 +15,11 @@
       "matches": ["<all_urls>"],
       "js": ["./dist/content.bundle.js"]
     }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["scripts/debug.js"],
+      "matches": ["<all_urls>"]
+    }
   ]
 }

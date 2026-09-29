@@ -5,6 +5,103 @@ import Tesseract from "tesseract.js";
 
 const imageOverlay = new Map()
 
+const OCR_DEBUG = {events: []}
+
+const OCR_DEBUG_ELEMENT_ID = "__homebrew_ocr_debug__"
+
+function updateOCRDebugDump(){
+    let element = document.getElementById(OCR_DEBUG_ELEMENT_ID)
+
+    if(!element){
+        element = document.createElement("script")
+
+        element.id = OCR_DEBUG_ELEMENT_ID
+        element.type = "application/json"
+        element.style.display = "none"
+
+        document.documentElement.appendChild(element)
+    }
+    element.textContent = JSON.stringify(OCR_DEBUG, null, 2)
+}
+
+function debugOCR(label, value){
+    let snapshot = value
+
+    try{
+        snapshot = structuredClone(value)
+    }catch(e){
+        try{
+            snapshot = JSON.parse(JSON.stringify(value))
+        }catch(e2){
+            snapshot = String(value)
+        }
+    }
+
+    OCR_DEBUG.events.push({
+        time: new Date().toISOString(),
+        label,
+        value: snapshot
+    })
+    updateOCRDebugDump()
+}
+
+function debugOCRError(label,error){
+    console.error(label, error)
+
+    OCR_DEBUG.events.push({
+        time: new Date().toISOString(),
+        label,
+        error: {
+            name: error?.name,
+            message: error?.message || String(error),
+            stack: error?.stack
+        }
+    })
+    updateOCRDebugDump()
+}
+
+function saveOCRDebugJSON(){
+    const json = JSON.stringify(OCR_DEBUG, null, 2)
+
+    const blob = new Blob([json], {
+        type: "application/json;charset=utf-8"
+    })
+    const url = URL.createObjectURL(blob)
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
+    const filename = `ocr-debug-${timestamp}.json`
+    const link = document.createElement("a")
+    link.href = url
+    link.download = filename
+    link.style.display = "none"
+    document.documentElement.appendChild(link)
+    link.click()
+    link.remove()
+
+    setTimeout(() => {
+        URL.revokeObjectURL(url)
+    }, 1000)
+}
+
+function installDebugAlias(){
+    if(document.getElementById("__homebrew_debug_alias__")) return
+
+    const script = document.createElement("script")
+
+    script.id = "__homebrew_debug_alias__"
+    script.src = chrome.runtime.getURL("scripts/debug.js")
+    script.onload = () => {script.remove()}
+    document.documentElement.appendChild(script)
+}
+
+
+document.addEventListener("__SAVE_OCR_DEBUG__", () => {saveOCRDebugJSON()})
+
+window.__OCR_DEBUG__ = OCR_DEBUG
+
+window.getOCRDebugJSON = function(){ return JSON.stringify(OCR_DEBUG, null, 2)}
+
+installDebugAlias()
+
 function updateOverlayPosition(imgElement, overlay){
     const rect = imgElement.getBoundingClientRect()
 
@@ -289,13 +386,44 @@ function createRefinementRectangle(region, imgElement){
 }
 
 function isProbablyNoiseRegion(region, selectedLang){
-    if(isCJKLanguage(selectedLang)) return false
-
-    const text = region.text.trim()
+    
+    const text = region.text?.trim() || ""
 
     if(!text) return true
+    
+    const confidence = Number(region.confidence) || 0
 
-    if(text.length <= 4 && region.confidence < 35) return true
+    const chars = [...text].filter(char => !/\s/u.test(char))
+    const meaningfulChars = chars.filter(char => /[\p{L}\p{N}]/u.test(char))
+
+    if(isCJKLanguage(selectedLang)){
+        const cjkChars = meaningfulChars.filter(char =>
+            /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(char)
+        )
+    
+
+        const latinChars = meaningfulChars.filter(char =>
+            /[A-Za-z]/.test(char)
+        )
+
+        if(meaningfulChars.length === 0) return true
+
+        if(confidence < 20) return true
+
+        if(chars.length <= 2 && confidence < 55) return true
+
+        if(cjkChars.length === 0 && latinChars.length > 0 && chars.length <= 4 && confidence < 85) return true
+
+        if(meaningfulChars.length <= 5 && cjkChars.length > 0 && latinChars.length > 0){
+            const cjkRatio = cjkChars.length / meaningfulChars.length
+
+            if(cjkRatio < 0.70 && confidence < 80) return true
+
+        }
+        return false
+    }
+
+    if(text.length <= 4 && confidence < 35) return true
 
     const hasLetterOrNumber = /[\p{L}\p{N}]/u.test(text)
 
@@ -1003,6 +1131,28 @@ function isCompatibleCharacterReplacement(original,replacement){
     return (originalScript === replacementScript)
 }
 
+function scoreInitialOCRResult(ocrData, selectedLang){
+    const stats = getOCRResultStats(ocrData, selectedLang)
+
+    if(!stats.wordCount) return -Infinity
+
+    const meaningfulWords = stats.words.filter(word => {
+        const text = word.text?.trim() || ""
+
+        if(!text) return false
+
+        if(isCJKLanguage(selectedLang)){
+            return (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(text))
+        }
+        return /[\p{L}\p{N}]/u.test(text)
+    })
+
+    const meaningfulRatio = meaningfulWords.length / Math.max(stats.wordCount, 1)
+
+    return (meaningfulWords.length * 8 + stats.averageConfidence * 0.35 
+        + meaningfulRatio * 30 - stats.lowConfidenceRatio * 25)
+}
+
 async function recognizeMicroContext(imgElement, region, context, selectedLang, worker, language){
     const rectangle = createMicroRefinementRectangle(context, imgElement, region.orientation)
 
@@ -1058,7 +1208,7 @@ async function recognizeMicroContext(imgElement, region, context, selectedLang, 
 
     }).filter(candidate => candidate.replacement)
 
-    console.log("OCR micro candidates: ",
+    debugOCR("OCR micro candidates: ",
         {
             target: context.target.text,
             originalConfidence: context.target.confidence,
@@ -1378,7 +1528,7 @@ async function refineTextRegions(regions, imgElement, selectedLang){
         try{
             const refined = await recognizeRegionSecondPass(imgElement,region,selectedLang)
             const useRefined = shouldUseRefinedOCR(region,refined,selectedLang)
-            console.log("OCR second pass: ",{
+            debugOCR("OCR second pass: ",{
                 orientation: region.orientation,
                 first: {
                     text: region.text,
@@ -1505,7 +1655,7 @@ async function recognizeRegionSecondPass(imgElement, region, selectedLang){
     const scoreReferenceText = hasStrongMicroCorrection ? microFirstPass.text : region.text
     const best = selectBestOCRCandidate(candidates, scoreReferenceText)
 
-    console.log("OCR refinement candidates: ", 
+    debugOCR("OCR refinement candidates: ", 
         candidates.map(candidate => ({
             preprocessing: candidate.preprocessing,
             text: candidate.text,
@@ -1515,7 +1665,7 @@ async function recognizeRegionSecondPass(imgElement, region, selectedLang){
             score: scoreOCRCandidate(candidate, scoreReferenceText, candidates)
         }))
     )
-    console.log("OCR  refinement winner: ",
+    debugOCR("OCR  refinement winner: ",
         {
             preprocessing: best.preprocessing,
             text: best.text,
@@ -1526,7 +1676,7 @@ async function recognizeRegionSecondPass(imgElement, region, selectedLang){
     )
 
     if(microFirstPass.corrections.length){
-        console.log("OCR micro-refinement: ", microFirstPass.corrections)
+        debugOCR("OCR micro-refinement: ", microFirstPass.corrections)
     }
     
 
@@ -1549,18 +1699,26 @@ async function recognizeRegionSecondPass(imgElement, region, selectedLang){
 async function readImage(imageTarget, selectedLang, mode = OCR_MODE.AUTO){
     const languages = getOCRLanguages(selectedLang)
 
-    console.log("OCR Language: ", {selected: selectedLang, loaded: languages})
+    debugOCR("OCR Language: ", {selected: selectedLang, loaded: languages})
 
     const worker = await getOCRWorker(selectedLang)
 
     
     if(mode === OCR_MODE.MANGA){
-        return await recognizeWorker(worker, imageTarget, Tesseract.PSM.SPARSE_TEXT)
+        const result = await recognizeWorker(worker, imageTarget, Tesseract.PSM.SPARSE_TEXT)
+        return {
+            primary: { name: "SPARSE_TEXT", language: selectedLang, result},
+            candidates: [{name: "SPARSE_TEXT", language: selectedLang, result}]
+        }
     }
 
 
     if(mode === OCR_MODE.DOCUMENT){
-        return await recognizeWorker(worker, imageTarget, Tesseract.PSM.AUTO)
+        const result = await recognizeWorker(worker, imageTarget, Tesseract.PSM.AUTO)
+        return {
+            primary: { name: "AUTO", language: selectedLang, result},
+            candidates: [{name: "AUTO", language: selectedLang, result}]
+        }
     }
 
     const autoResult = await recognizeWorker(worker, imageTarget, Tesseract.PSM.AUTO)
@@ -1570,22 +1728,62 @@ async function readImage(imageTarget, selectedLang, mode = OCR_MODE.AUTO){
         selectedLang
     )
 
-    if(!shouldRetrySparse) return autoResult
+    if(!shouldRetrySparse){
+        return {
+            primary: { name: "AUTO", language: selectedLang, result: autoResult},
+            candidates: [{name: "AUTO", language: selectedLang,result: autoResult}]
+        }
+    }
 
     console.log("AUTO pouco confiavel. Testando SPARSE_TEXT...")
 
     const sparseResult = await recognizeWorker(worker, imageTarget, Tesseract.PSM.SPARSE_TEXT)
-    const useSparse = shouldPreferSparseResult(autoResult, sparseResult, selectedLang)
 
-    console.log("OC initial mode comparison: ", 
+     const candidates = [
         {
-            auto: getOCRResultStats(autoResult, selectedLang),
-            sparse: getOCRResultStats(sparseResult, selectedLang),
-            selected: useSparse ? "SPARSE_TEXT" : "AUTO"
+            name: "AUTO",
+            language: selectedLang,
+            result: autoResult
+        },
+        {
+            name: "SPARSE_TEXT",
+            language: selectedLang,
+            result: sparseResult
         }
+    ]
+
+    if(isCJKLanguage(selectedLang)){
+        const {worker: verticalWorker, language:verticalLanguage} = await getRefinementWorker(selectedLang,"vertical")
+    
+        console.log("Testing dedicated vertical OCR: ", verticalLanguage)
+    
+        const verticalResult = await recognizeWorker(verticalWorker,imageTarget,Tesseract.PSM.SPARSE_TEXT)
+    
+        candidates.push({
+            name: "VERTICAL_SPARSE_TEXT",
+            language: verticalLanguage,
+            result: verticalResult
+        })
+    }
+
+    for(const candidate of candidates){
+        candidate.score = scoreInitialOCRResult(candidate.result, candidate.language || selectedLang)
+    }
+
+    candidates.sort((a, b) => b.score - a.score)
+
+    debugOCR("OCR initial candidates: ", 
+        candidates.map(candidate => ({
+            mode: candidate.name,
+            language: candidate.language,
+            score: candidate.score,
+            stats: getOCRResultStats(candidate.result, candidate.language || selectedLang)
+        }))
     )
 
-    return useSparse ? sparseResult : autoResult
+    debugOCR("OCR initial winner: ", candidates[0].name)
+
+    return {primary: candidates[0], candidates}
     
 }
 
@@ -1767,7 +1965,7 @@ function extractOCRWords(ocrData, selectedLang){
         }
 
         if(isProbablyOCRNoise(word, selectedLang)){
-            console.log("OCR Noise Removed: ", {
+            debugOCR("OCR Noise Removed: ", {
                 text: word.text, confidence: word.confidence
             })
             return
@@ -1865,6 +2063,96 @@ function splitHorizontalWordsByGap(words) {
     }
 
     return groups
+}
+
+function ocrBboxArea(bbox){
+    return (Math.max(0, bbox.x1 - bbox.x0) * Math.max(0, bbox.y1 - bbox.y0))
+    
+}
+
+function ocrBboxIntersectionArea(a, b){
+    const x0 = Math.max(a.x0, b.x0)
+    const y0 = Math.max(a.y0, b.y0)
+    const x1 = Math.min(a.x1, b.x1)
+    const y1 = Math.min(a.y1, b.y1)
+
+    if(x1 <= x0 || y1 <= y0) return 0
+
+    return ((x1 - x0) * (y1 - y0))
+}
+
+function ocrRegionOverlap(a,b){
+    const intersection = ocrBboxIntersectionArea(a.bbox,b.bbox)
+    if(!intersection) return 0
+
+    const smallerArea = Math.min(ocrBboxArea(a.bbox), ocrBboxArea(b.bbox))
+    if(!smallerArea) return 0
+
+    return(intersection / smallerArea)
+}
+
+function scoreOCRRegion(region, selectedLang){
+    const text = region.text?.trim() || ""
+    const chars = [...text].filter(char => !/\s/u.test(char))
+
+    const meaningful = chars.filter(char => /[\p{L}\p{N}]/u.test(char))
+
+    let cjkCount = 0
+
+    if(isCJKLanguage(selectedLang)){
+        cjkCount = meaningful.filter(char => 
+            /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(char)
+        ).length
+    }
+
+    const confidence = Number(region.confidence) || 0
+
+    return (cjkCount * 12 + meaningful.length * 3 + confidence)
+}
+
+function mergeOCRCandidateRegions(ocrData, selectedLang){
+    const candidateData = Array.isArray(ocrData?.candidates)
+        ? ocrData.candidates
+        : [{name: "LEGACY", language: selectedLang, result: ocrData}]
+
+    const allRegions = []
+
+    for(const candidate of candidateData){
+        if(!candidate?.result) continue
+
+        const candidateLanguage = candidate?.language || selectedLang
+        const structure = buildOCRStructure(candidate.result, candidateLanguage)
+        console.log(`OCR regions from ${candidate.name}:`, structure.regions)
+
+        for(const region of structure.regions){
+            allRegions.push({
+                ...region,
+                ocrSource: candidate.name,
+                ocrLanguage: candidateLanguage
+            })
+        }
+    }
+    allRegions.sort((a,b) =>
+        scoreOCRRegion(b, selectedLang) - scoreOCRRegion(a, selectedLang)
+    )
+
+    const merged = []
+
+    for(const region of allRegions){
+        const duplicate = merged.some(existing => {
+            const overlap = ocrRegionOverlap(existing, region)
+            return(overlap >= 0.60)
+        })
+
+        if(duplicate) continue
+
+        merged.push(region)
+    }
+
+    return merged.map((region, index) => ({
+        ...region,
+        id: `region-${index}`
+    }))
 }
 
 function buildOCRLines(words, selectedLang){
@@ -2121,11 +2409,18 @@ async function getOCRSafeImage(pageImage){
 async function drawTranslationBlocks(ocrData, ocrImage, displayImage, sourceLanguage, targetLanguage){
 
 
-    const {words, lines, regions: firstPassRegions} = buildOCRStructure(ocrData, sourceLanguage)
+    const firstPassRegions = mergeOCRCandidateRegions(ocrData, sourceLanguage)
 
-    console.log("OCR words: ", words)
-    console.log("OCR lines: ", lines)
-    console.log("OCR first-pass regions: ", firstPassRegions)
+    debugOCR("OCR merged first-pass regions:",
+        firstPassRegions.map(region => ({
+            source: region.ocrSource,
+            language: region.ocrLanguage,
+            text: region.text,
+            confidence: region.confidence,
+            orientation: region.orientation,
+            bbox: region.bbox
+        }))
+    )
 
     const regions = await refineTextRegions(firstPassRegions, ocrImage, sourceLanguage)
 
@@ -2149,13 +2444,14 @@ async function drawTranslationBlocks(ocrData, ocrImage, displayImage, sourceLang
     for(const [index, region] of regions.entries()){
 
         if(isProbablyNoiseRegion(region, sourceLanguage)){
-            console.log("OCR region removed as noise:", region)
-            continue
+            debugOCR("OCR region removed as noise:", region)
+            continue;
         }
 
         const originalText = region.text.trim();
 
-        if(!originalText) continue
+        if(!originalText) continue;
+
         if(!isCJKLanguage(sourceLanguage) && originalText.length < 2) continue;
 
         const bbox = region.bbox
@@ -2164,7 +2460,7 @@ async function drawTranslationBlocks(ocrData, ocrImage, displayImage, sourceLang
         const widthBox = ((bbox.x1 - bbox.x0) / naturalWidth) * 100
         const heightBox = ((bbox.y1 - bbox.y0) / naturalHeight) * 100
 
-        console.log(`Region ${index}: `, 
+        debugOCR(`Region ${index}: `, 
             {   text: originalText, 
                 orientation: region.orientation, 
                 confidence: region.confidence,
@@ -2219,7 +2515,7 @@ async function drawTranslationBlocks(ocrData, ocrImage, displayImage, sourceLang
                 balon.innerText = translationResult.translation
                 balon.dataset.correctedText = translationResult.correctedText || originalText
                 
-                console.log(`Translation ${index}:`,{
+                debugOCR(`Translation ${index}:`,{
                     original: originalText,
                     corrected: translationResult.correctedText,
                     translation:
@@ -2229,7 +2525,7 @@ async function drawTranslationBlocks(ocrData, ocrImage, displayImage, sourceLang
                 return translationResult
             }
         ).catch(e => {
-            console.error(`Translation failed for region ${index}:`, e)
+            debugOCRError(`Translation failed for region ${index}:`, e)
             balon.innerText = originalText
             balon.dataset.translationError = "true"
 
@@ -2341,12 +2637,28 @@ function setupImageHover() {
                 const targetLanguage = data.langTo
 
                 if(!sourceLanguage || !targetLanguage){
-                    console.error("Nenhum idioma de origem configurado")
+                    debugOCRError("Nenhum idioma de origem configurado")
                     translationBtn.innerText = "No language"
                     return
                 }
 
                 const runId = ++ocrRunId
+
+                OCR_DEBUG.events.length = 0
+
+                updateOCRDebugDump()
+
+                debugOCR("OCR run started:", {
+                    runId,
+                    sourceLanguage,
+                    targetLanguage,
+                    image: {
+                        src: currentImage?.currentSrc || currentImage?.src,
+                        width: currentImage?.naturalWidth,
+                        height: currentImage?.naturalHeight,
+                    }
+                })
+
                 const targetImage = currentImage
 
                 if(!targetImage) return
@@ -2371,7 +2683,7 @@ function setupImageHover() {
                     translationBtn.innerText = 'Done'
                 }catch(e){
                     if(runId !== ocrRunId) return
-                    console.error('Erro no Tesseract: ', e)
+                    debugOCRError('Erro no Tesseract: ', e)
                     translationBtn.innerText = 'Erro'
                 }
                 setTimeout(() => {
