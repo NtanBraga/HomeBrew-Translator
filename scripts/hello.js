@@ -1,3 +1,22 @@
+async function warmUpOllama(){
+    try{
+        console.log("Warming up translation model...")
+        const response = await chrome.runtime.sendMessage({
+            type: "OLLAMA_WARMUP"
+        })
+
+        if(!response?.ok){
+            console.warn("Ollama warmup failed: ", response?.error)
+            return false
+        }
+        console.log("Translation model ready: ", response.result)
+        return true
+    }catch(e) {
+        console.warn("Unable to warm up Ollama:", e)
+        return false
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const toggleSwitch = document.querySelector('.switch input[type="checkbox"]')
 
@@ -7,6 +26,9 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.storage.local.get(['translationActive', 'langFrom', 'langTo'], (data) => {
         if(data.translationActive !== undefined){
             toggleSwitch.checked = data.translationActive
+        }
+        if(data.translationActive){
+            warmUpOllama()
         }
         if(data.langFrom) {
             fromSelect.value = data.langFrom
@@ -26,7 +48,11 @@ document.addEventListener('DOMContentLoaded', () => {
     })
 
     toggleSwitch.addEventListener('change', (e) => {
-        chrome.storage.local.set({ translationActive: e.target.checked })
+        chrome.storage.local.set({ translationActive: e.target.checked }, () => {
+            if(e.target.checked){
+                warmUpOllama()
+            }
+        })
     })
 
     fromSelect.addEventListener('change', (e) => {

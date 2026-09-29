@@ -50,8 +50,11 @@ const OLLAMA_CONFIG = {
     baseUrl: "http://127.0.0.1:11434",
     model: "kaelri/hy-mt2:7b",
     timeout: 120000,
-    keepAlive: "10m"
+    keepAlive: "10m",
+    numCtx: 2048
 }
+
+let warmupPromise = null
 
 function getLanguageName(language){
     return (LANGUAGE_NAMES[language] || language)
@@ -152,6 +155,51 @@ export async function isTranslationModelInstalled(){
     )
 }
 
+export async function warmUpTranslationModel(){
+
+    if(warmupPromise) return warmupPromise
+
+    warmupPromise = (async () => {
+        const startedAt = performance.now()
+    
+        const response = await ollamaFetch("/api/generate", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                model:OLLAMA_CONFIG.model,
+                prompt: "",
+                stream: false,
+                keep_alive: OLLAMA_CONFIG.keepAlive,
+                options: {
+                    num_ctx: OLLAMA_CONFIG.numCtx
+                }
+            })
+        })  
+
+        const data = await response.json()
+
+        const elapsed = performance.now() - startedAt
+        const result = {
+            model: data.model || OLLAMA_CONFIG.model,
+            elapsedMs: Math.round(elapsed),
+            loadDurationNs: Number(data.load_duration) || 0,
+            totalDurationNs: Number(data.total_duration) || 0
+        }
+        console.log("Ollama model warmed up:", result)
+
+        return result
+    
+    })()
+
+    try{
+        return await warmupPromise
+    }finally{
+        warmupPromise = null
+    }
+}
+
 export async function translateWithOllama({
     text,
     sourceLanguage = "jpn",
@@ -159,6 +207,15 @@ export async function translateWithOllama({
     lowConfidenceWords = [],
     context = ""
 }){
+
+    if(warmupPromise){
+        try{
+            await warmupPromise
+        }catch(e){
+            console.warn("Ollama warmup failed before translation: ", e)
+        }
+    }
+
     if(!text || !text.trim()){
         throw new Error("No text provided for translation")
     }
@@ -185,7 +242,7 @@ export async function translateWithOllama({
             top_p: 0.6,
             top_k: 20,
             repeat_penalty: 1.05,
-            num_ctx: 8192,
+            num_ctx: OLLAMA_CONFIG.numCtx,
             num_predict: 1024
         }
     }

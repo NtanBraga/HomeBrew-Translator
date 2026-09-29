@@ -1,8 +1,26 @@
 import './hot-take.js'
 
-import { translateWithOllama,isOllamaAvailable,isTranslationModelInstalled } from './services/ollama'
+import { translateWithOllama,isOllamaAvailable,isTranslationModelInstalled, warmUpTranslationModel } from './services/ollama'
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+
+    if(message?.type === "OLLAMA_WARMUP") {
+        warmUpTranslationModel().then(result => {
+            sendResponse({
+                ok: true,
+                result
+            })
+        }).catch(e => {
+            console.error("Ollama warmup error: ", e)
+            sendResponse({
+                ok: false,
+                error: e?.message || String(e)
+            })
+        })
+
+        return true
+    }
+
     if(message?.type === "OLLAMA_TRANSLATE"){
         translateWithOllama(message.payload).then(result => {
             sendResponse({ok: true, result})
@@ -11,7 +29,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             sendResponse({
                 ok: false,
-                error: error?.message || String(error)
+                error: e?.message || String(e)
             })
         })
         return true
@@ -26,7 +44,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }).catch(e => {
             sendResponse({
                 ok: false,
-                error: error?.message || String(error)
+                error: e?.message || String(e)
             })
         })
         return true

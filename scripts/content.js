@@ -2108,6 +2108,8 @@ async function drawTranslationBlocks(ocrData, imgElement, sourceLanguage, target
 
     const overlay = createImageOverlay(imgElement)
 
+    const translationJobs = []
+
     for(const [index, region] of regions.entries()){
 
         if(isProbablyNoiseRegion(region, sourceLanguage)){
@@ -2174,30 +2176,34 @@ async function drawTranslationBlocks(ocrData, imgElement, sourceLanguage, target
 
         overlay.appendChild(balon)
 
-        try{
-            const translationResult = await translateOCRRegion(region, sourceLanguage, targetLanguage)
+        const job = translateOCRRegion(region, sourceLanguage, targetLanguage).then(
+            translationResult => {
+                if(!translationResult?.translation) throw new Error("Empty translation")
 
-            if(!translationResult?.translation){
-                throw new Error("Empty translation")
+                balon.innerText = translationResult.translation
+                balon.dataset.correctedText = translationResult.correctedText || originalText
+                
+                console.log(`Translation ${index}:`,{
+                    original: originalText,
+                    corrected: translationResult.correctedText,
+                    translation:
+                    translationResult.translation,
+                    corrections: translationResult.corrections
+                })
+                return translationResult
             }
-
-            balon.innerText = translationResult.correctedText
-            balon.dataset.correctedText = translationResult.correctedText || originalText
-            
-            console.log(`Translation ${index}:`,{
-                original: originalText,
-                corrected: translationResult.correctedText,
-                translation:
-                translationResult.translation,
-                corrections: translationResult.corrections
-            })
-
-        }catch(e){
+        ).catch(e => {
             console.error(`Translation failed for region ${index}:`, e)
             balon.innerText = originalText
             balon.dataset.translationError = "true"
-        }
+
+            throw e
+        })
+        translationJobs.push(job)
     }
+    const results = await Promise.allSettled(translationJobs)
+
+    console.log("Translations finished:", results)
 }
 
 
