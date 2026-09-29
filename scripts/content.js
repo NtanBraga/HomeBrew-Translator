@@ -7,22 +7,6 @@ const imageOverlay = new Map()
 
 const OCR_DEBUG = {events: []}
 
-const OCR_DEBUG_ELEMENT_ID = "__homebrew_ocr_debug__"
-
-function updateOCRDebugDump(){
-    let element = document.getElementById(OCR_DEBUG_ELEMENT_ID)
-
-    if(!element){
-        element = document.createElement("script")
-
-        element.id = OCR_DEBUG_ELEMENT_ID
-        element.type = "application/json"
-        element.style.display = "none"
-
-        document.documentElement.appendChild(element)
-    }
-    element.textContent = JSON.stringify(OCR_DEBUG, null, 2)
-}
 
 function debugOCR(label, value){
     let snapshot = value
@@ -42,7 +26,6 @@ function debugOCR(label, value){
         label,
         value: snapshot
     })
-    updateOCRDebugDump()
 }
 
 function debugOCRError(label,error){
@@ -57,7 +40,6 @@ function debugOCRError(label,error){
             stack: error?.stack
         }
     })
-    updateOCRDebugDump()
 }
 
 function saveOCRDebugJSON(){
@@ -93,12 +75,7 @@ function installDebugAlias(){
     document.documentElement.appendChild(script)
 }
 
-
 document.addEventListener("__SAVE_OCR_DEBUG__", () => {saveOCRDebugJSON()})
-
-window.__OCR_DEBUG__ = OCR_DEBUG
-
-window.getOCRDebugJSON = function(){ return JSON.stringify(OCR_DEBUG, null, 2)}
 
 installDebugAlias()
 
@@ -308,24 +285,6 @@ function normalizeOCRText(text, selectedLang){
     return normalized.replace(/\s*\n+\s*/g, " ").replace(/[ \t]+/g, " ").trim()
 }
 
-function shouldPreferSparseResult(autoResult, sparseResult, selectedLang){
-    const auto = getOCRResultStats(autoResult, selectedLang)
-    const sparse = getOCRResultStats(sparseResult, selectedLang)
-
-    if(!sparse.wordCount) return false
-    if(!auto.wordCount) return true
-
-    const muchBetterConfidence = sparse.averageConfidence >= auto.averageConfidence + 7
-    const muchMoreText = sparse.wordCount >= auto.wordCount * 1.4 
-        && sparse.averageConfidence >= auto.averageConfidence - 3
-
-    const worseNoise = sparse.lowConfidenceRatio > auto.lowConfidenceRatio + 0.15
-
-    if(worseNoise) return false
-
-    return (muchBetterConfidence || muchMoreText)
-}
-
 function shouldUseRefinedOCR(region,refined,selectedLang){
     if(!refined.text) return false
 
@@ -447,6 +406,70 @@ function getOCRLanguages(selectedLang){
 
 function isCJKLanguage(language){
     return CJK_LANGUAGES.has(language)
+}
+
+function extractOCRWords(ocrData, selectedLang){
+    if(!ocrData.tsv) return []
+
+    const rows = ocrData.tsv.trim().split('\n').map(row => row.split('\t'))
+
+    rows.shift()
+
+    const words = []
+
+    rows.forEach(columns => {
+
+        if(columns.length < 12) return
+
+        const [
+            level,
+            pageNum,
+            blockNum,
+            parNum,
+            lineNum,
+            wordNum,
+            left,
+            top,
+            width,
+            height,
+            confidence
+        ] = columns
+    
+
+        const text = columns.slice(11).join('\t').trim()
+
+        if(Number(level) !== 5)return;
+
+        if(!text) return
+
+        const x = Number(left)
+        const y = Number(top)
+        const w = Number(width)
+        const h = Number(height)
+        const conf = Number(confidence)
+
+        const word = {
+            text,
+            confidence: Number.isFinite(conf) ? conf : 0,
+            pageNum: Number(pageNum),
+            blockNum: Number(blockNum),
+            parNum: Number(parNum),
+            lineNum: Number(lineNum),
+            wordNum: Number(wordNum),
+            bbox: {
+                x0: x,
+                y0: y,
+                x1: x + w,
+                y1: y + h
+            }  
+        }
+
+        if(isProbablyOCRNoise(word, selectedLang)){
+            return
+        }
+        words.push(word)
+    })
+    return words
 }
 
 function inspectSparseMode(ocrData, selectedLang){
@@ -1730,7 +1753,6 @@ async function readImage(imageTarget, selectedLang, mode = OCR_MODE.AUTO){
 
     if(!shouldRetrySparse){
         return {
-            primary: { name: "AUTO", language: selectedLang, result: autoResult},
             candidates: [{name: "AUTO", language: selectedLang,result: autoResult}]
         }
     }
@@ -1783,7 +1805,7 @@ async function readImage(imageTarget, selectedLang, mode = OCR_MODE.AUTO){
 
     debugOCR("OCR initial winner: ", candidates[0].name)
 
-    return {primary: candidates[0], candidates}
+    return {candidates}
     
 }
 
@@ -1908,72 +1930,7 @@ function calculateOCRScale(region){
     return Math.max(2, Math.min(5, scale))
 }
 
-function extractOCRWords(ocrData, selectedLang){
-    if(!ocrData.tsv) return []
 
-    const rows = ocrData.tsv.trim().split('\n').map(row => row.split('\t'))
-
-    rows.shift()
-
-    const words = []
-
-    rows.forEach(columns => {
-
-        if(columns.length < 12) return
-
-        const [
-            level,
-            pageNum,
-            blockNum,
-            parNum,
-            lineNum,
-            wordNum,
-            left,
-            top,
-            width,
-            height,
-            confidence
-        ] = columns
-    
-
-        const text = columns.slice(11).join('\t').trim()
-
-        if(Number(level) !== 5)return;
-
-        if(!text) return
-
-        const x = Number(left)
-        const y = Number(top)
-        const w = Number(width)
-        const h = Number(height)
-        const conf = Number(confidence)
-
-        const word = {
-            text,
-            confidence: Number.isFinite(conf) ? conf : 0,
-            pageNum: Number(pageNum),
-            blockNum: Number(blockNum),
-            parNum: Number(parNum),
-            lineNum: Number(lineNum),
-            wordNum: Number(wordNum),
-            bbox: {
-                x0: x,
-                y0: y,
-                x1: x + w,
-                y1: y + h
-            }  
-        }
-
-        if(isProbablyOCRNoise(word, selectedLang)){
-            debugOCR("OCR Noise Removed: ", {
-                text: word.text, confidence: word.confidence
-            })
-            return
-        }
-        words.push(word)
-    })
-    return words
-}
 
 //calculo primitivo usando o posicionamento do x e y 
 //largura e tamanho usados para ver se o texto esta na vertical ou horizontal
@@ -2533,9 +2490,7 @@ async function drawTranslationBlocks(ocrData, ocrImage, displayImage, sourceLang
         })
         translationJobs.push(job)
     }
-    const results = await Promise.allSettled(translationJobs)
-
-    console.log("Translations finished:", results)
+    await Promise.allSettled(translationJobs)
 }
 
 
@@ -2646,7 +2601,6 @@ function setupImageHover() {
 
                 OCR_DEBUG.events.length = 0
 
-                updateOCRDebugDump()
 
                 debugOCR("OCR run started:", {
                     runId,
@@ -2667,7 +2621,6 @@ function setupImageHover() {
                     translationBtn.innerText = "Reading..."
                     const ocrImage = await getOCRSafeImage(targetImage)
                     const ocrData = await readImage(ocrImage, sourceLanguage, OCR_MODE.AUTO)
-                    console.log('Dados extraidos: ', ocrData)
 
                     if(runId !== ocrRunId) return
 
