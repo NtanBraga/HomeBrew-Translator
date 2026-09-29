@@ -50,7 +50,7 @@ const OLLAMA_CONFIG = {
     baseUrl: "http://127.0.0.1:11434",
     model: "kaelri/hy-mt2:7b",
     timeout: 120000,
-    keepAlive: "10m",
+    keepAlive: "2m",
     numCtx: 2048
 }
 
@@ -198,6 +198,37 @@ export async function warmUpTranslationModel(){
     }finally{
         warmupPromise = null
     }
+}
+
+export async function unloadTranslationModel(){
+    if(warmupPromise){
+        try{
+            await warmupPromise
+        }catch(e){
+            console.warn("Warmup failed before unload: ", e)
+        }
+    }
+    const response = await ollamaFetch("/api/generate", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            model:OLLAMA_CONFIG.model,
+            stream: false,
+            keep_alive: 0,
+        })
+    })  
+
+    const data = await response.json()
+    console.log("Ollama model unloaded: ", data)
+
+    return {
+        model: data.model || OLLAMA_CONFIG.model,
+        unloaded: true
+    }
+
+
 }
 
 export async function translateWithOllama({

@@ -17,6 +17,25 @@ async function warmUpOllama(){
     }
 }
 
+async function unloadOllama(){
+    try{
+        console.log("Unloading translation model...")
+        const response = await chrome.runtime.sendMessage({
+            type: "OLLAMA_UNLOAD"
+        })
+
+        if(!response?.ok){
+            console.warn("Ollama unload failed: ", response?.error)
+            return false
+        }
+        console.log("Translation model unloaded.")
+        return true
+    }catch(e) {
+        console.warn("Unable to unload Ollama:", e)
+        return false
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const toggleSwitch = document.querySelector('.switch input[type="checkbox"]')
 
@@ -51,6 +70,8 @@ document.addEventListener('DOMContentLoaded', () => {
         chrome.storage.local.set({ translationActive: e.target.checked }, () => {
             if(e.target.checked){
                 warmUpOllama()
+            }else{
+                unloadOllama()
             }
         })
     })
