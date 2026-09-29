@@ -2082,16 +2082,16 @@ function buildOCRStructure(ocrData, selectedLang){
     return { words, lines, regions}
 }
 
-async function drawTranslationBlocks(ocrData, imgElement, selectedLang){
+async function drawTranslationBlocks(ocrData, imgElement, sourceLanguage, targetLanguage){
 
 
-    const {words, lines, regions: firstPassRegions} = buildOCRStructure(ocrData, selectedLang)
+    const {words, lines, regions: firstPassRegions} = buildOCRStructure(ocrData, sourceLanguage)
 
     console.log("OCR words: ", words)
     console.log("OCR lines: ", lines)
     console.log("OCR first-pass regions: ", firstPassRegions)
 
-    const regions = await refineTextRegions(firstPassRegions, imgElement, selectedLang)
+    const regions = await refineTextRegions(firstPassRegions, imgElement, sourceLanguage)
 
     if(regions.length === 0) {
         console.warn("No region found") 
@@ -2108,9 +2108,9 @@ async function drawTranslationBlocks(ocrData, imgElement, selectedLang){
 
     const overlay = createImageOverlay(imgElement)
 
-    regions.forEach((region, index) => {
+    for(const [index, region] of regions.entries()){
 
-        if(isProbablyNoiseRegion(region, selectedLang)){
+        if(isProbablyNoiseRegion(region, sourceLanguage)){
             console.log("OCR region removed as noise:", region)
             return
         }
@@ -2118,7 +2118,7 @@ async function drawTranslationBlocks(ocrData, imgElement, selectedLang){
         const originalText = region.text.trim();
 
         if(!originalText) return
-        if(!isCJKLanguage(selectedLang) && originalText.length < 2) return;
+        if(!isCJKLanguage(sourceLanguage) && originalText.length < 2) continue;
 
         const bbox = region.bbox
         const leftBox = (bbox.x0 / naturalWidth) * 100
@@ -2168,16 +2168,69 @@ async function drawTranslationBlocks(ocrData, imgElement, selectedLang){
             pointer-events: none !important; 
         `
 
-        if(region.orientation === "vertical" && usesNoWordSpaces(selectedLang)){
-            balon.style.writingMode = "vertical-rl"
-            balon.style.textOrientation = "upright"
-        }
-
-        balon.innerText = originalText
+        balon.style.writingMode = "horizontal-tb"
+        balon.style.textOrientation = "mixed"
+        balon.innerText = "Translating..."
 
         overlay.appendChild(balon)
-    })
+
+        try{
+            const translationResult = await translateOCRRegion(region, sourceLanguage, targetLanguage)
+
+            if(!translationResult?.translation){
+                throw new Error("Empty translation")
+            }
+
+            balon.innerText = translationResult.correctedText
+            balon.dataset.correctedText = translationResult.correctedText || originalText
+            
+            console.log(`Translation ${index}:`,{
+                original: originalText,
+                corrected: translationResult.correctedText,
+                translation:
+                translationResult.translation,
+                corrections: translationResult.corrections
+            })
+
+        }catch(e){
+            console.error(`Translation failed for region ${index}:`, e)
+            balon.innerText = originalText
+            balon.dataset.translationError = "true"
+        }
+    }
 }
+
+
+//comunicação com o ollama
+
+function getLowConfidenceOCRWords(region, threshold = 40){
+    return region.lines?.flatMap(line => line.words || [])
+        .filter(word => (Number(word.confidence) || 0) < threshold)
+        .map(word => ({
+            text: word.text,
+            confidence: Number(word.confidence) || 0
+        })) || []
+}
+
+export async function translateOCRRegion(region, sourceLanguage, targetLanguage){
+    if(!region?.text) return null
+
+    const lowConfidenceWords = getLowConfidenceOCRWords(region)
+
+    const response = await chrome.runtime.sendMessage({
+        type: "OLLAMA_TRANSLATE",
+        payload: {
+            text: region.text,
+            sourceLanguage,
+            targetLanguage,
+            lowConfidenceWords
+        }
+    })
+    if(!response) throw new Error("Background returned no response")
+    if(!response.ok) throw new Error(response.error || "Ollama translation failed")
+
+    return response.result
+    } 
 
 //botao temporario para traducao
 function setupImageHover() {
@@ -2240,12 +2293,13 @@ function setupImageHover() {
 
             translationBtn.innerText = 'Reading...'
 
-            chrome.storage.local.get(['langFrom'], async (data) => {
+            chrome.storage.local.get(['langFrom', 'langTo'], async (data) => {
                 
-                const language = data.langFrom
+                const sourceLanguage = data.langFrom
+                const targetLanguage = data.langTo
 
-                if(!language){
-                    console.error("Nenhum idiona de origem configurado")
+                if(!sourceLanguage || !targetLanguage){
+                    console.error("Nenhum idioma de origem configurado")
                     translationBtn.innerText = "No language"
                     return
                 }
@@ -2256,13 +2310,15 @@ function setupImageHover() {
                 if(!targetImage) return
 
                 try{
-
-                    const ocrData = await readImage(targetImage, language, OCR_MODE.AUTO)
+                    translationBtn.innerText = "Reading..."
+                    const ocrData = await readImage(targetImage, sourceLanguage, OCR_MODE.AUTO)
                     console.log('Dados extraidos: ', ocrData)
 
                     if(runId !== ocrRunId) return
 
-                    await drawTranslationBlocks(ocrData, targetImage, language)
+                    translationBtn.innerText = "Translating..."
+
+                    await drawTranslationBlocks(ocrData, targetImage, sourceLanguage, targetLanguage)
 
                     if(runId !== ocrRunId){
                         removeImageOverlay(targetImage)
