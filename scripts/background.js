@@ -24,7 +24,62 @@ async function unloadIfPossible(){
     return true
 }
 
+function arrayBufferToBase64(buffer){
+    const bytes = new Uint8Array(buffer)
+    const chunkSize = 0x8000
+    let binary = ""
+
+    for(let i = 0; i < bytes.length; i += chunkSize){
+        const chunk = bytes.subarray(i, i + chunkSize)
+        binary += String.fromCharCode(...chunk)
+    }
+    return btoa(binary)
+}
+
+async function fetchImageForOCR(url){
+    const parsed = new URL(url)
+
+    if(parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("Unsupported image protocol")
+    
+    const response = await fetch(parsed.href,{
+        method: "GET",
+        credentials: "include",
+        cache: "force-cache"
+    })
+    if(!response.ok) throw new Error(`Image HTTP ${response.status}`)
+
+    const contentType = response.headers.get("content-type") || "image/png"
+
+    if(!contentType.startsWith("image/")) throw new Error(`Unexpected content type: ${contentType}`)
+
+    const buffer = await response.arrayBuffer()
+    const base64 = arrayBufferToBase64(buffer)
+    
+    return (`data:${contentType};base64,${base64}`)
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+
+    if(message?.type === "FETCH_IMAGE_FOR_OCR"){
+        ;(async () => {
+            try{
+                const dataUrl = await fetchImageForOCR(message.url)
+
+                sendResponse({
+                    ok: true,
+                    dataUrl
+                })
+            }catch(e){
+                console.error("OCR image fetch failed: ", e)
+
+                sendResponse({
+                    ok: false,
+                    error: e?.message || String(e)
+                })
+            }
+        })()
+        return true
+    }
 
     if(message?.type === "OLLAMA_WARMUP") {
 

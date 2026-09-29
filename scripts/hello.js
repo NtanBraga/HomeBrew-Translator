@@ -46,9 +46,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if(data.translationActive !== undefined){
             toggleSwitch.checked = data.translationActive
         }
-        if(data.translationActive){
-            warmUpOllama()
-        }
         if(data.langFrom) {
             fromSelect.value = data.langFrom
 

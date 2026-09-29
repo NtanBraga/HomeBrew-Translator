@@ -2082,7 +2082,43 @@ function buildOCRStructure(ocrData, selectedLang){
     return { words, lines, regions}
 }
 
-async function drawTranslationBlocks(ocrData, imgElement, sourceLanguage, targetLanguage){
+function loadImageFromSource(src){
+    return new Promise((resolve, reject) => {
+        const image = new Image()
+
+        image.onload = () => resolve(image)
+        image.onerror = () => reject(new Error("Failed to load OCR image"))
+
+        image.src = src
+    })
+}
+
+async function getOCRSafeImage(pageImage){
+    const src = pageImage.currentSrc || pageImage.src
+
+    if(!src) throw new Error("Image has no source")
+
+    if(src.startsWith("data:")) return await loadImageFromSource(src)
+
+    try{
+        const url = new URL(src, location.href)
+
+        if(url.origin === location.origin) return pageImage
+    }catch(e){
+        console.warn("Could not inspect image URL: ", e)
+    }
+
+    const response = await chrome.runtime.sendMessage({
+        type: "FETCH_IMAGE_FOR_OCR",
+        url: src
+    })
+
+    if(!response?.ok) throw new Error(response?.error || "Could not fetch OCR image")
+
+    return await loadImageFromSource(response.dataUrl)
+}
+
+async function drawTranslationBlocks(ocrData, ocrImage, displayImage, sourceLanguage, targetLanguage){
 
 
     const {words, lines, regions: firstPassRegions} = buildOCRStructure(ocrData, sourceLanguage)
@@ -2091,22 +2127,22 @@ async function drawTranslationBlocks(ocrData, imgElement, sourceLanguage, target
     console.log("OCR lines: ", lines)
     console.log("OCR first-pass regions: ", firstPassRegions)
 
-    const regions = await refineTextRegions(firstPassRegions, imgElement, sourceLanguage)
+    const regions = await refineTextRegions(firstPassRegions, ocrImage, sourceLanguage)
 
     if(regions.length === 0) {
         console.warn("No region found") 
         return
     }
 
-    const naturalWidth = imgElement.naturalWidth
-    const naturalHeight = imgElement.naturalHeight
+    const naturalWidth = ocrImage.naturalWidth
+    const naturalHeight = ocrImage.naturalHeight
 
     if(!naturalWidth || !naturalHeight) {
         console.warn("No natural image dimentions") 
         return
     }
 
-    const overlay = createImageOverlay(imgElement)
+    const overlay = createImageOverlay(displayImage)
 
     const translationJobs = []
 
@@ -2114,12 +2150,12 @@ async function drawTranslationBlocks(ocrData, imgElement, sourceLanguage, target
 
         if(isProbablyNoiseRegion(region, sourceLanguage)){
             console.log("OCR region removed as noise:", region)
-            return
+            continue
         }
 
         const originalText = region.text.trim();
 
-        if(!originalText) return
+        if(!originalText) continue
         if(!isCJKLanguage(sourceLanguage) && originalText.length < 2) continue;
 
         const bbox = region.bbox
@@ -2317,14 +2353,15 @@ function setupImageHover() {
 
                 try{
                     translationBtn.innerText = "Reading..."
-                    const ocrData = await readImage(targetImage, sourceLanguage, OCR_MODE.AUTO)
+                    const ocrImage = await getOCRSafeImage(targetImage)
+                    const ocrData = await readImage(ocrImage, sourceLanguage, OCR_MODE.AUTO)
                     console.log('Dados extraidos: ', ocrData)
 
                     if(runId !== ocrRunId) return
 
                     translationBtn.innerText = "Translating..."
 
-                    await drawTranslationBlocks(ocrData, targetImage, sourceLanguage, targetLanguage)
+                    await drawTranslationBlocks(ocrData, ocrImage, targetImage, sourceLanguage, targetLanguage)
 
                     if(runId !== ocrRunId){
                         removeImageOverlay(targetImage)
