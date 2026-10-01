@@ -41,8 +41,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const fromSelect = document.getElementById('translate-from')
     const toSelect = document.getElementById('translate-to')
+    const formatSelect = document.getElementById('format')
 
-    chrome.storage.local.get(['translationActive', 'langFrom', 'langTo'], (data) => {
+    chrome.storage.local.get(['translationActive', 'langFrom', 'langTo', 'ocrMode'], (data) => {
         if(data.translationActive !== undefined){
             toggleSwitch.checked = data.translationActive
         }
@@ -56,9 +57,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         if(data.langTo) {
             toSelect.value = data.langTo
-        }else{
+        }
+        else{
             chrome.storage.local.set({
                 langTo: toSelect.value
+            })
+        }
+        if(data.ocrMode){
+            formatSelect.value = data.ocrMode
+        }else{
+            chrome.storage.local.set({
+                ocrMode: formatSelect.value
             })
         }
     })
@@ -79,5 +88,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     toSelect.addEventListener('change', (e) => {
         chrome.storage.local.set({ langTo: e.target.value })
+    })
+
+    formatSelect.addEventListener('change', e => {
+        chrome.storage.local.set({
+            ocrMode: e.target.value
+        })
     })
 })

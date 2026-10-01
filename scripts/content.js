@@ -211,6 +211,22 @@ const NO_SPACE_LANGUAGES = new Set([
 
 const OCR_WORKERS = new Map()
 
+function normalizeOCRMode(mode){
+    switch(mode){
+        case OCR_MODE.MANGA: return OCR_MODE.MANGA
+        case OCR_MODE.DOCUMENT: return OCR_MODE.DOCUMENT
+        default: return OCR_MODE.AUTO
+    }
+}
+
+function isExplicitVerticalLanguage(language) {
+    return (language?.endsWith("_vert") === true)
+}
+
+function getPreferredOrientation(language){
+    return isExplicitVerticalLanguage(language) ? "vertical" : "horizontal"
+}
+
 function usesNoWordSpaces(language){
     return NO_SPACE_LANGUAGES.has(language)
 }
@@ -255,8 +271,21 @@ function isProbablyOCRNoise(word,selectedLang){
     return false
 }
 
-function meaningfulCharacterCount(text) {
-    return [...text.replace(/\s/g, "")].length
+function isHardNoiseRegion(region, selectedLang){
+    const text = region.text?.trim() || ""
+
+    if(!text) return true
+
+    const chars = [...text].filter(char => !/\s/u.test(char))
+    const meaningful = chars.filter(char => /[\p{L}\p{N}]/u.test(char))
+
+    if(meaningful.length === 0) return true
+
+    const confidence = Number(region.confidence) || 0
+
+    if(meaningful.length === 1 && confidence < 10) return true
+
+    return false
 }
 
 function getBaseLanguage(language){
@@ -288,64 +317,62 @@ function normalizeOCRText(text, selectedLang){
 function shouldUseRefinedOCR(region,refined,selectedLang){
     if(!refined.text) return false
 
-    const firstLength = meaningfulCharacterCount(region.text)
-    const refinedLength = meaningfulCharacterCount(refined.text)
+    if(refined.preprocessing === "first-pass") return false
 
-    if(firstLength > 0 && refinedLength < firstLength * 0.65) return false
-
-    if(normalizeForComparison(refined.text) === normalizeForComparison(region.text)) return true
-
-    let allStrong
-
-    if(refined.preprocessing === "first-pass+micro"){
-        const corrections = refined.microCorrections || []
-        allStrong = corrections.length > 0 && corrections.every(correction =>
-            correction.consensus === true && correction.microConfidence >= 70
-        )
+    if(Number.isFinite(refined.score) && Number.isFinite(refined.firstPassScore)){
+        return (refined.score >= refined.firstPassScore + 3)
     }
 
-    if(allStrong) return true
-
-    if(refined.confidence < 25) return false
-
-    if(isCJKLanguage(selectedLang)){
-        return (refined.confidence >= region.confidence - 8) 
-    }
-
-    return( refined.confidence >= region.confidence - 5)
+    return (refined.confidence >= region.confidence)
 }
 
-function createRefinementRectangle(region, imgElement){
+function estimateRegionCharacterSize(region){
+    const words = region.lines?.flatMap(line => line.words || []) || []
+
+    const sizes = words.map(word => {
+        const width = bboxWidth(word.bbox)
+        const height = bboxHeight(word.bbox)
+        return Math.min(width, height)
+    }).filter(size => Number.isFinite(size) && size > 2)
+
+    if(sizes.length) return median(sizes)
+
+    return 16
+}
+
+function createRefinementRectangle(region, imgElement, orientation = region.orientation){
 
     const bbox = region.bbox
-    const orientation = region.orientation
 
-    const thicknesses = region.lines?.map(line => {
+    const charSize = estimateRegionCharacterSize(region)
+
+    let horizontalPadding = Math.max(5, Math.round(charSize * 0.75))
+    let verticalPadding = horizontalPadding
+
+    if(orientation !== region.orientation){
         if(orientation === "vertical"){
-            return bboxWidth(line.bbox)
+            verticalPadding = Math.round(charSize * 4)
+            horizontalPadding = Math.round(charSize * 1.5)
+        }else{
+            horizontalPadding = Math.round(charSize * 4)
+            verticalPadding = Math.round(charSize * 1.5)
         }
-        return bboxHeight(line.bbox)
-    }) || []
-
-    const averageThickness = thicknesses.length ? averageBbox(thicknesses)
-        : (orientation === "vertical" ? bboxWidth(bbox) : bboxHeight(bbox))
-
-    const padding = Math.min(20, Math.max(4, Math.round(averageThickness * 0.35)))
-    const left = Math.max(0, Math.floor(bbox.x0 - padding))
-    const top = Math.max(0, Math.floor(bbox.y0 - padding))
-    const right = Math.min(imgElement.naturalWidth, Math.ceil(bbox.x1 + padding))
-    const bottom = Math.min(imgElement.naturalHeight, Math.ceil(bbox.y1 + padding))
-
-    return {
-        left,
-        top,
-        width: Math.max(1, right - left),
-        height: Math.max(1, bottom - top)
     }
+    if(orientation === "vertical") {
+        verticalPadding = Math.max(verticalPadding, Math.round(charSize * 1.5))
+    }else{
+        horizontalPadding = Math.max(horizontalPadding, Math.round(charSize * 1.5))
+    }
+
+    const left = Math.max(0, Math.floor(bbox.x0 - horizontalPadding))
+    const top = Math.max(0, Math.floor(bbox.y0 - verticalPadding))
+    const right = Math.min(imgElement.naturalWidth, Math.ceil(bbox.x1 + horizontalPadding))
+    const bottom = Math.min(imgElement.naturalHeight, Math.ceil(bbox.y1 + verticalPadding))
+
+    return {left, top, width: Math.max(1, right - left), height: Math.max(1, bottom - top)}
 }
 
-function isProbablyNoiseRegion(region, selectedLang){
-    
+function isProbablyMangaNoiseRegion(region, selectedLang){
     const text = region.text?.trim() || ""
 
     if(!text) return true
@@ -364,6 +391,15 @@ function isProbablyNoiseRegion(region, selectedLang){
         const latinChars = meaningfulChars.filter(char =>
             /[A-Za-z]/.test(char)
         )
+
+        const supportCount = Number(region.ocrSupportCount) || 1
+        const wasRefined = region.refined === true
+
+        if(confidence < 35 && supportCount < 2 && !wasRefined) return true
+        
+        if(cjkChars.length <= 3 && confidence < 45 && supportCount < 2) return true
+        
+        if(wasRefined && confidence < 25) return true
 
         if(meaningfulChars.length === 0) return true
 
@@ -389,18 +425,38 @@ function isProbablyNoiseRegion(region, selectedLang){
     if(!hasLetterOrNumber && region.confidence < 85) return true
 
     return false
+
+}
+
+function isProbablyDocumentNoiseRegion(region, selectedLang){
+    const text = region.text?.trim() || ""
+
+    if(!text) return true
+    
+    const confidence = Number(region.confidence) || 0
+    
+    const meaningful = [...text].filter(char => /[\p{L}\p{N}]/u.test(char))
+
+    if(meaningful.length === 0) return true
+
+    if(confidence < 10) return true
+
+    if(meaningful.length === 1 && confidence < 25) return true
+
+    return false
+}
+
+function isProbablyNoiseRegion(region, selectedLang, mode){
+    
+    if(mode === OCR_MODE.MANGA){
+        return isProbablyMangaNoiseRegion(region,selectedLang)
+    }
+
+    return isProbablyDocumentNoiseRegion(region, selectedLang)
 }
 
 function getOCRLanguages(selectedLang){
-    if(selectedLang.endsWith("_vert")){
-        return [selectedLang]
-    }
 
-    const verticalLang = VERTICAL_LANGUAGE_MAP[selectedLang]
-
-    if(verticalLang) {
-        return [selectedLang, verticalLang]
-    }
     return [selectedLang]
 }
 
@@ -470,6 +526,53 @@ function extractOCRWords(ocrData, selectedLang){
         words.push(word)
     })
     return words
+}
+
+function createScaledOCRCanvas(imgElement, scale = 2){
+    const width = imgElement.naturalWidth || imgElement.width
+    const height = imgElement.naturalHeight || imgElement.height
+    const canvas = document.createElement("canvas")
+    canvas.width = Math.round(width * scale)
+    canvas.height = Math.round(height * scale)
+
+    const ctx = canvas.getContext("2d", {willReadFrequently: true})
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = "high"
+    ctx.drawImage(
+        imgElement,
+        0,
+        0,
+        width,
+        height,
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    )
+    return canvas
+}
+
+function rescaleOCRResult(ocrData, scale){
+    if(!ocrData?.tsv || scale === 1) return ocrData
+
+    const rows = ocrData.tsv.split("\n")
+    const scaledTSV = rows.map((row,index) => {
+        if(index === 0 || !row.trim()) return row
+
+        const columns = row.split("\t")
+
+        if(columns.length < 10) return row
+
+        for(const columnIndex of [6,7,8,9]){
+            const value = Number(columns[columnIndex])
+            if(Number.isFinite(value)){
+                columns[columnIndex] = String(Math.round(value / scale))
+            }
+        }
+        return columns.join("\t")
+    }).join("\n")
+
+    return {...ocrData, tsv: scaledTSV}
 }
 
 function inspectSparseMode(ocrData, selectedLang){
@@ -693,83 +796,6 @@ function needsAggressiveRefinement(candidates) {
 
 }
 
-function getRefinementPSM(region) {
-    if(region.orientation == "vertical"){
-        return Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
-    }
-    if(region.lines?.length === 1){
-        return Tesseract.PSM.SINGLE_LINE
-    }
-
-    return Tesseract.PSM.SINGLE_BLOCK
-}
-
-function getReliableLineWords(context){
-    const words = context.lineWords?.length
-        ? context.lineWords
-        : context.words
-    const targetKey = getOCRWordKey(context.target)
-    const withoutTarget = words.filter(word => getOCRWordKey(word) !== targetKey)
-
-    return withoutTarget.length ? withoutTarget : words
-}
-
-function getLowConfidenceWords(region,threshold = 30, maxWords = 3){
-    const suspicious = []
-
-    const regionConfidence = Number(region.confidence) || 0
-
-    for(const line of region.lines || []){
-        for(const word of line.words || []){
-            const confidence = Number(word.confidence) || 0
-            const relativeDrop = regionConfidence - confidence
-            const absolutelyLow = confidence < threshold
-            const unusuallyLow = regionConfidence >= 75 && relativeDrop >= 35
-
-            if(absolutelyLow || unusuallyLow){
-                suspicious.push({
-                    word,
-                    line,
-                    severity: Math.max(threshold - confidence, relativeDrop)
-                })
-            }
-        }
-    }
-    return suspicious.sort((a,b) => b.severity - a.severity).slice(0, maxWords)
-}
-
-function getOCRWordKey(word){
-    return [
-        word.pageNum,
-        word.blockNum,
-        word.parNum,
-        word.lineNum,
-        word.wordNum
-    ].join("-")
-}
-
-function getWordContext(line,targetWord,radius = 1){
-    const words = line.words || []
-
-    const targetKey = getOCRWordKey(targetWord)
-
-    const index = words.findIndex(word => getOCRWordKey(word) === targetKey)
-
-    if(index === -1) return null
-
-    const start = Math.max(0, index - radius)
-    const end = Math.min(words.length, index + radius + 1)
-
-    return {
-        words: words.slice(start, end),
-        lineWords: words,
-        before: words.slice(start, index),
-        target: targetWord,
-        after: words.slice(index + 1, end),
-        lineBBox: line.bbox
-    }
-}
-
 function median(values){
     if(!values.length) return 0
 
@@ -784,374 +810,86 @@ function median(values){
     return sorted[middle]
 }
 
-function createMicroRefinementRectangle(context, imgElement, orientation){
-    const bbox = calculateBoundingBox(context.words)
-
-    if(!bbox) return null
-
-    const reliableWords = getReliableLineWords(context)
-
-    const sizes = reliableWords.map(word => orientation === "vertical"
-        ? bboxWidth(word.bbox)
-        : bboxHeight(word.bbox)
-    ).filter(size => Number.isFinite(size) && size > 0)
-
-    const typicalSize = median(sizes) || estimateLineThickness(context, orientation) || 12
-    const padding = Math.max(4, Math.round(typicalSize * 0.45))
-    const left = Math.max(0, Math.floor(bbox.x0 - padding))
-    const top = Math.max(0, Math.floor(bbox.y0 - padding))
-    const right = Math.min(imgElement.naturalWidth, Math.ceil(bbox.x1 + padding))
-    const bottom = Math.min(imgElement.naturalHeight, Math.ceil(bbox.y1 + padding))
-
-    return {
-        left,
-        top,
-        width: Math.max(1, right - left),
-        height: Math.max(1, bottom - top)
-    }
+function countCJKCharacters(text){
+    return [...text || ""].filter(char => 
+        /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(char)
+    ).length
 }
 
-function calculateMicroAdjustedConfidence(region, corrections){
-    if(!corrections.length) return region.confidence
+function scoreRegionOCRCandidate(candidate, region, selectedLang, allCandidates){
+    if(!candidate?.text) return -Infinity
 
-    const corrected = new Map(corrections.map(
-        correction => [correction.wordKey, correction.microConfidence]
-    ))
-    const confidences = region.lines.flatMap(line => line.words || []).map(
-        word => { 
-            const key = getOCRWordKey(word)
+    let score = Number(candidate.confidence) || 0
+    const text = normalizeForComparison(candidate.text)
+    const chars = [...text].filter(char => 
+        /[\p{L}\p{N}]/u.test(char)
+    )
+    if(isCJKLanguage(selectedLang)){
+        const cjkCount = countCJKCharacters(text)
+        const cjkRatio = cjkCount / Math.max(chars.length, 1)
 
-            return corrected.has(key) 
-                ? Number(corrected.get(key)) || 0 : Number(word.confidence) || 0
+        score += cjkCount * 2
+        score += cjkRatio * 20
+
+        if(cjkCount === 0) score -=  30
+    }
+
+    if(chars.length === 1)score -= 12
+
+    const width = bboxWidth(region.bbox)
+    const height = bboxHeight(region.bbox)
+
+    if(candidate.orientation === "vertical"){
+        if(height > width * 1.35) score += 8
+        
+    }else{
+        if(width > height * 1.35) score += 8
+    }
+
+    for(const other of allCandidates){
+        if(other === candidate) continue
+
+        const otherText = normalizeForComparison(other.text)
+
+        if(text && text === otherText){
+            score += other.orientation === candidate.orientation ? 8 : 3
         }
+    }
+
+    if(candidate.preprocessing === "raw") score += 1
+
+    if(candidate.preprocessing === "otsu") score -= 1
+
+    const preferredOrientation = getPreferredOrientation(selectedLang)
+
+    if(candidate.orientation === preferredOrientation) score += 8
+
+    return score
+}
+
+function finalizeOCRCandidates(candidates, selectedLang){
+    for(const candidate of candidates){
+        candidate.score = scoreInitialOCRResult(candidate.result, candidate.language || selectedLang)
+    }
+    candidates.sort((a, b) => b.score - a.score)
+
+    debugOCR("OCR initial candidates: ",
+        candidates.map(candidate => ({
+            mode: candidate.name,
+            language: candidate.language,
+            score: candidate.score,
+            stats: getOCRResultStats(candidate.result, candidate.language || selectedLang)
+        }))
     )
 
-    return confidences.length ? averageBbox(confidences) : region.confidence
+    debugOCR("OCR initial winner:", candidates[0]?.name)
 }
 
-function calculateMicroOCRScale(context,orientation){
-
-    const reliableWords = getReliableLineWords(context)
-
-    const sizes = reliableWords.map(word => orientation === "vertical" 
-        ? bboxWidth(word.bbox)
-        : bboxHeight(word.bbox)
-    ).filter(size => Number.isFinite(size) && size > 0)
-
-    const typicalSize = median(sizes) || 12
-    const targetSize = 90
-    const scale = targetSize / Math.max(typicalSize, 1)
-
-    return Math.max(4, Math.min(8, scale))
-}
-
-function extractMicroReplacement(text, context, selectedLang){
-    if(!text) return null
-    
-    const normalize = value => {
-        const normalized = normalizeOCRText(value || "", selectedLang)
-        
-        return usesNoWordSpaces(selectedLang)
-            ? normalized.replace(/\s+/g, "")
-            : normalized.replace(/\s+/g, " ").trim()
-    }
-
-    const result = normalize(text)
-    const separator = usesNoWordSpaces(selectedLang) ? "" : " "
-    const before = normalize(context.before.map(word => word.text).join(separator))
-    const after = normalize(context.after.map(word => word.text).join(separator))
-
-    if(before && !result.startsWith(before)) return null
-
-    if(after && !result.endsWith(after)) return null
-
-    let replacement = result
-
-    if(before){
-        replacement = replacement.slice(before.length)
-    }
-    if(after){
-        replacement = replacement.slice(0, replacement.length - after.length)
-    }
-
-    replacement = replacement.trim()
-
-    if(!replacement) return null
-
-    const originalLength = [...context.target.text].length
-    const replacementLength = [...replacement].length
-
-    if(originalLength === 1 && replacementLength !== 1) return null
-
-    if(originalLength > 1 && Math.abs(replacementLength - originalLength) > 1) return null
-
-    return replacement
-}
-
-function estimateLineThickness(context, orientation){
-    const words = getReliableLineWords(context)
-
-    const sizes = words.map(word => orientation === "vertical"
-        ? bboxWidth(word.bbox) : bboxHeight(word.bbox)
-    ).filter(size => Number.isFinite(size) && size > 0)
-
-    return median(sizes)
-}
-
-function extractMicroReplacementByPosition(candidate, context, rectangle, scale, orientation){
-    if(!candidate.words?.length) return null
-
-    const target = context.target
-
-    const {x: targetNaturalX, y: targetNaturalY } = estimateSingleCharacterCenter(context, orientation)
-
-    const targetX = (targetNaturalX - rectangle.left) * scale
-    const targetY = (targetNaturalY - rectangle.top) * scale
-
-    let bestWord = null
-    let bestDistance = Infinity
-
-    for(const word of candidate.words) {
-        const centerX = bboxCenterX(word.bbox)
-        const centerY = bboxCenterY(word.bbox)
-
-        const distance = Math.hypot(centerX - targetX, centerY - targetY)
-
-        if(distance < bestDistance){
-            bestDistance = distance
-            bestWord = word
-        }
-    }
-    if(!bestWord) return null
-
-    const estimatedSize = Math.max(12, estimateLineThickness(context, orientation))
-
-    const maxDistance = estimatedSize * scale * 1.25
-
-    if(bestDistance > maxDistance) return null
-
-    const text = bestWord.text?.trim()
-
-    if(!text) return null
-    const originalLength = [...target.text].length
-    const candidateLength = [...text].length
-    
-    if(originalLength === 1 && candidateLength !== 1) return null
-
-    if(originalLength > 1 && Math.abs(candidateLength - originalLength) > 1) return null
-
-    return {
-        replacement: text,
-        confidence: Number(bestWord.confidence) || 0,
-        distance: bestDistance,
-    }
-}
-
-function estimateSingleCharacterCenter(context, orientation){
-    const target = context.target
-    const references = getReliableLineWords(context)
-    
-    if(orientation === "vertical"){
-        const centersX = references.map(word => bboxCenterX(word.bbox)).filter(Number.isFinite)
-        return {
-            x: centersX.length ? median(centersX) : bboxCenterX(context.lineBBox || target.bbox),
-            y: bboxCenterY(target.bbox)
-        }   
-    }
-
-    const centersY = references.map(word => bboxCenterY(word.bbox)).filter(Number.isFinite)
-
-    return {
-        x: bboxCenterX(target.bbox),
-        y: centersY.length ? median(centersY) : bboxCenterY(context.lineBBox || target.bbox)
-    }
-}
-
-function createSingleCharacterRectangle(context,imgElement,orientation){
-    const target = context.target
-
-    const lineThickness = estimateLineThickness(context, orientation)
-
-    const charSize = Math.max(12, lineThickness)
-
-    const {x: centerX, y: centerY} = estimateSingleCharacterCenter(context, orientation)
-
-    const cropSize = charSize * 1.15
-    const half = cropSize / 2
-    const left = Math.max(0, Math.floor(centerX - half))
-    const top = Math.max(0, Math.floor(centerY - half))
-    const right = Math.min(imgElement.naturalWidth, Math.ceil(centerX + half))
-    const bottom = Math.min(imgElement.naturalHeight, Math.ceil(centerY + half))
-
-    return {
-        left,
-        top,
-        width: Math.max(1, right - left),
-        height: Math.max(1, bottom - top)
-    }
-}
-
-async function recognizeSingleCharacterFallback(imgElement, region, context, selectedLang){
-    const rectangle = createSingleCharacterRectangle(context, imgElement, region.orientation)
-    const scale = 8
-    const rawCanvas = createUpScaledRegionCanvas(imgElement, rectangle, scale)
-    const contrastCanvas = cloneCanvas(rawCanvas)
-    const otsuCanvas = cloneCanvas(rawCanvas)
-    
-    applyGrayscaleAndContrast(contrastCanvas, 1.35)
-    applyOtsuThreshold(otsuCanvas)
-
-    const psm = Tesseract.PSM.SINGLE_CHAR
-    const {worker, language} = await getRefinementWorker(getBaseLanguage(selectedLang), "horizontal")
-    const raw = await recognizeRefinementCanvas(worker, rawCanvas, language, selectedLang, psm)
-    const contrast = await recognizeRefinementCanvas(worker, contrastCanvas, language, selectedLang, psm)
-    const otsu = await recognizeRefinementCanvas(worker, otsuCanvas, language, selectedLang, psm)
-
-    return {
-        raw,
-        contrast,
-        otsu,
-        rectangle,
-        scale
-    }
-}
-
-function extractSingleCharacterCandidate(candidate, selectedLang, originalText){
-    if(!candidate?.text) return null
-
-    const normalized = normalizeOCRText(candidate.text, selectedLang).replace(/\s+/g, "")
-    const characters = [...normalized].filter(char => /[\p{L}\p{N}]/u.test(char))
-
-    if(characters.length !== 1) return null
-
-    const replacement = characters[0]
-
-    if(!isCompatibleCharacterReplacement(originalText, replacement)) return null
-
-    const confidence = candidate.words?.length === 1 
-        ? candidate.words[0].confidence
-        : candidate.confidence
-
-    return {
-        replacement,
-        confidence: Number(confidence) || 0
-    }
-}
-
-function selectSingleCharacterFallback(fallback, selectedLang, originalText){
-    
-    const sources = [
-        {
-            name: "raw",
-            data: fallback.raw
-        },
-        {
-            name: "contrast",
-            data: fallback.contrast
-        },
-        {
-            name: "otsu",
-            data: fallback.otsu
-        }
-    ]
-
-    const candidates = sources.map(source => {
-        const candidate = extractSingleCharacterCandidate(source.data,selectedLang,originalText)
-        if(!candidate) return null
-
-        return{...candidate, source: source.name}
-    }).filter(Boolean)
-
-    if(!candidates.length) return null
-
-    const groups = new Map()
-
-    for(const candidate of candidates){
-        if(!groups.has(candidate.replacement)){
-            groups.set(candidate.replacement, [])
-        }
-        groups.get(candidate.replacement).push(candidate)
-    }
-
-    const majority = [...groups.entries()].map(([replacement, votes]) => ({
-        replacement, votes
-    })).filter(group => group.votes.length >= 2).sort((a,b) => b.votes.length - a.votes.length)[0]
-
-    if(majority){
-        const confidence = Math.min(...majority.votes.map(vote => vote.confidence))
-
-        if(confidence >= 60){
-            return {
-                replacement: majority.replacement,
-                confidence,
-                consensus: true,
-                method: "single-char-majority",
-                votes: majority.votes.map(vote => vote.source),
-                scale: fallback.scale,
-                rectangle: fallback.rectangle
-            }
-        }
-    }
-
-    const ordered = [...candidates].sort((a,b) => b.confidence - a.confidence)
-    const best = ordered[0]
-    const second = ordered[1]
-
-    if(best.confidence < 92) return null
-
-    if(second && (best.confidence - second.confidence) < 15) return null
-
-    return {
-        replacement: best.replacement,
-        confidence: best.confidence,
-        consensus: false,
-        method: `single-char-${best.source}`,
-        scale: fallback.scale,
-        rectangle: fallback.rectangle
-    }
-}
-
-function isReliableMicroResult(result, originalText){
-    if(!result?.replacement || result.replacement === originalText) return false
-
-    if(result.consensus === true){
-        return (result.confidence >= 60)
-    }
-    return (result.confidence >= 85)
-}
-
-function getCharacterScript(char){
-    if(/\p{Script=Han}/u.test(char)){
-        return "han"
-    }
-    if(/\p{Script=Hiragana}/u.test(char)){
-        return "hiragana"
-    }
-    if(/\p{Script=Katakana}/u.test(char)){
-        return "katakana"
-    }
-    if(/\p{Script=Hangul}/u.test(char)){
-        return "hangul"
-    }
-    if(/\p{N}/u.test(char)){
-        return "number"
-    }
-    if(/\p{L}/u.test(char)){
-        return "letter"
-    }
-    return "other"
-}
-
-function isCompatibleCharacterReplacement(original,replacement){
-    const originalChars = [...original]
-    const replacementChars = [...replacement]
-
-    if(originalChars.length !== 1 || replacementChars.length !== 1) return false
-
-    const originalScript = getCharacterScript(originalChars[0])
-    const replacementScript = getCharacterScript(replacementChars[0])
-
-    return (originalScript === replacementScript)
+function selectBestRegionOCRCandidate(candidates, region, selectedLang){
+    return candidates.map(candidate => ({
+        ...candidate,
+        score: scoreRegionOCRCandidate(candidate, region, selectedLang, candidates)
+    })).sort((a, b) => b.score - a.score)[0]
 }
 
 function scoreInitialOCRResult(ocrData, selectedLang){
@@ -1176,250 +914,14 @@ function scoreInitialOCRResult(ocrData, selectedLang){
         + meaningfulRatio * 30 - stats.lowConfidenceRatio * 25)
 }
 
-async function recognizeMicroContext(imgElement, region, context, selectedLang, worker, language){
-    const rectangle = createMicroRefinementRectangle(context, imgElement, region.orientation)
-
-    if(!rectangle) return null
-
-    const scale = calculateMicroOCRScale(context, region.orientation)
-    const rawCanvas = createUpScaledRegionCanvas(imgElement, rectangle, scale)
-    const contrastCanvas = cloneCanvas(rawCanvas)
-
-    applyGrayscaleAndContrast(contrastCanvas, 1.35)
-
-    const psm = region.orientation === "vertical"
-        ? Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
-        : Tesseract.PSM.SINGLE_LINE
-
-    const raw = await recognizeRefinementCanvas(worker, rawCanvas, language, selectedLang, psm)
-    const contrast = await recognizeRefinementCanvas(worker, contrastCanvas, language, selectedLang, psm)
-    const candidates = [
-        {
-            ...raw,
-            preprocessing: "micro-raw"
-        },
-        {
-            ...contrast,
-            preprocessing: "micro-contrast"
-        }
-    ]
-
-    const replacements = candidates.map(candidate => {
-        
-        let replacement = extractMicroReplacement(candidate.text, context, selectedLang)
-        let method = "context"
-        let replacementConfidence = candidate.confidence
-        let distance = null
-        if(!replacement){
-            const positional = extractMicroReplacementByPosition(candidate, context,rectangle, scale, region.orientation)
-
-            if(positional) {
-                replacement = positional.replacement
-                replacementConfidence = positional.confidence
-                distance = positional.distance
-                method = "position"
-            }
-        }
-
-        return {
-            ...candidate,
-            replacement,
-            replacementConfidence,
-            distance,
-            extractionMethod: method
-        }
-
-    }).filter(candidate => candidate.replacement)
-
-    debugOCR("OCR micro candidates: ",
-        {
-            target: context.target.text,
-            originalConfidence: context.target.confidence,
-            candidates: candidates.map(candidate => ({
-                preprocessing: candidate.preprocessing,
-                text: candidate.text,
-                confidence: candidate.confidence,
-                words: candidate.words?.map(word => ({
-                    text: word.text,
-                    confidence: word.confidence,
-                    bbox: word.bbox
-                }))
-            })),
-            replacements:
-                replacements.map(candidate => ({
-                    text: candidate.replacement,
-                    method: candidate.extractionMethod,
-                    confidence: candidate.replacementConfidence,
-                    distance: candidate.distance
-                }))
-        }
-    )
-
-    if(!replacements.length) return null
-
-    if(replacements.length >= 2 && replacements[0].replacement === replacements[1].replacement){
-
-        const consensusConfidence = Math.min(replacements[0].replacementConfidence, replacements[1].replacementConfidence,)
-
-        if(consensusConfidence >= 60){
-            return {
-                replacement: replacements[0].replacement,
-                confidence: consensusConfidence,
-                consensus: true,
-                candidates,
-                rectangle,
-                scale
-            }
-        }
+function shouldRefineRegion(region, selectedLang, mode){
+    if(mode === OCR_MODE.MANGA){
+        return (isCJKLanguage(selectedLang) || region.confidence < 92 || region.lines?.length > 1)
     }
 
-    const best = [...replacements].sort((a,b) => b.replacementConfidence - a.replacementConfidence)[0]
-
-    if(best.replacementConfidence < 80) return null
-
-    return {
-        replacement: best.replacement,
-        confidence: best.replacementConfidence,
-        consensus: false,
-        candidates,
-        rectangle,
-        scale
-    }
+    return (region.confidence < 70)
 }
 
-async function microRefineLowConfidenceWords(imgElement, region, selectedLang, worker, language){
-
-    if(!isStructurallyReliableRegion(region)){
-        return {
-            text: region.text,
-            corrections: []
-        }
-    }
-
-    const isCJK = isCJKLanguage(selectedLang)
-
-    const threshold = isCJK ? 35 : 30
-
-    const maxWords = isCJK ? 4 : 3
-
-    const suspicious = getLowConfidenceWords(region, threshold, maxWords)
-    
-    if(!suspicious.length){
-        return {
-            text: region.text,
-            corrections: []
-        }
-    }
-
-    const overrides = new Map()
-    const corrections = []
-
-    for(const {word, line} of suspicious){
-        const context = getWordContext(line,word, 1)
-
-        if(!context) continue
-
-        let result = await recognizeMicroContext(imgElement, region, context,selectedLang, worker, language)
-
-        const originalLength = [...word.text].length
-        const scriptCompatible = originalLength !== 1 
-            || !isCJKLanguage(selectedLang)
-            || !result?.replacement
-            || isCompatibleCharacterReplacement(word.text, result.replacement) 
-        const microSolved = scriptCompatible && isReliableMicroResult(result, word.text)
-
-        if(!microSolved && originalLength === 1 && isCJKLanguage(selectedLang)){
-            console.log("Micro OCR inconclusive. " +
-                "Trying SINGLE_CHAR:", {
-                    text: word.text,
-                    confidence: word.confidence,
-                    orientation: region.orientation
-                }
-            )
-            const fallback = await recognizeSingleCharacterFallback(imgElement, region, context, selectedLang)
-            const fallbackResult = selectSingleCharacterFallback(fallback, selectedLang, word.text)
-
-            console.log("SINGLE_CHAR candidates:", {
-                    original: word.text,
-                    orientation: region.orientation,
-                    rectangle: fallback.rectangle,
-                    scale: fallback.scale,
-                    raw: { 
-                        text: fallback.raw.text,
-                        confidence: fallback.raw.confidence,
-                        words: fallback.raw.words
-                    },
-                    contrast: {
-                        text: fallback.contrast.text,
-                        confidence: fallback.contrast.confidence,
-                        words: fallback.contrast.words
-                    },
-                    otsu: {
-                        text: fallback.otsu.text,
-                        confidence: fallback.otsu.confidence,
-                        words: fallback.otsu.words
-                    }
-            })
-
-            
-
-            if(fallbackResult){
-                console.log("SINGLE_CHAR result:", {
-                    original: word.text,
-                    replacement: fallbackResult.replacement,
-                    confidence: fallbackResult.confidence,
-                    consensus: fallbackResult.consensus,
-                    method: fallbackResult.method
-                })
-            }
-            result = fallbackResult || null
-        }
-
-        if(!result?.replacement) continue
-
-        const finalScriptCompatible = originalLength !== 1
-            || !isCJKLanguage(selectedLang)
-            || isCompatibleCharacterReplacement(word.text, result.replacement)
-
-        if(!finalScriptCompatible) continue
-
-        if(!isReliableMicroResult(result, word.text)) continue
-
-        if(result.replacement === word.text) continue
-
-        const key = getOCRWordKey(word)
-
-        overrides.set(key, result.replacement)
-
-        corrections.push({
-            wordKey: key,
-            original: word.text,
-            replacement: result.replacement,
-            originalConfidence: word.confidence,
-            microConfidence: result.confidence,
-            consensus: result.consensus,
-            scale: result.scale,
-            bbox: word.bbox,
-            method: result.method || "micro-context"
-        })
-    }
-
-    const lineTexts = region.lines.map(line => {
-        const separator = usesNoWordSpaces(selectedLang) ? "" : " "
-
-        return (line.words || []).map(word => {
-            const key = getOCRWordKey(word)
-
-            return (overrides.get(key) ?? word.text)
-        }).join(separator)
-    })
-
-    const regionSeparator = usesNoWordSpaces(selectedLang) ? "" : " "
-    const text = lineTexts.join(regionSeparator)
-
-    return {text, corrections}
-
-}
 
 async function getOCRWorker(selectedLang){
     const languages = getOCRLanguages(selectedLang)
@@ -1530,18 +1032,16 @@ async function recognizeRefinementCanvas(worker, canvas, language, selectedLang,
     }
 }
 
-async function refineTextRegions(regions, imgElement, selectedLang){
+async function refineTextRegions(regions, imgElement, selectedLang, mode){  
     const refinedRegions = []
 
     for(const region of regions){
-        if(isProbablyNoiseRegion(region, selectedLang)){
+        if(isHardNoiseRegion(region, selectedLang)){
             refinedRegions.push(region) 
             continue
         }
 
-        const shouldRefine = isCJKLanguage(selectedLang)
-            || region.confidence < 92 
-            || region.lines?.length > 1
+        const shouldRefine = shouldRefineRegion(region, selectedLang, mode)
 
         if(!shouldRefine){
             refinedRegions.push(region)
@@ -1549,7 +1049,7 @@ async function refineTextRegions(regions, imgElement, selectedLang){
         }
 
         try{
-            const refined = await recognizeRegionSecondPass(imgElement,region,selectedLang)
+            const refined = await recognizeRegionSecondPass(imgElement,region,selectedLang, mode)
             const useRefined = shouldUseRefinedOCR(region,refined,selectedLang)
             debugOCR("OCR second pass: ",{
                 orientation: region.orientation,
@@ -1585,228 +1085,272 @@ async function refineTextRegions(regions, imgElement, selectedLang){
                 refinementCandidates: refined.candidates,
                 refined: useRefined,
                 text: useRefined ? refined.text : region.text,
-                confidence: useRefined ? refined.confidence : region.confidence
+                confidence: useRefined ? refined.confidence : region.confidence,
+                orientation: useRefined ? (refined.orientation || region.orientation) : region.orientation,
+                ocrLanguage: useRefined ? (refined.language || region.ocrLanguage) : region.ocrLanguage
             })
         }catch(e) {
-            console.warn("Second OCR pass failed: ", e)
+            debugOCRError("Second OCR pass failed: ", e)
             refinedRegions.push(region)
         }
     }
     return refinedRegions
 }
 
-async function recognizeRegionSecondPass(imgElement, region, selectedLang){
-    const {worker, language} = await getRefinementWorker(selectedLang, region.orientation)
-    const microFirstPass = await microRefineLowConfidenceWords(imgElement, region, selectedLang, worker, language)
-    const psm = getRefinementPSM(region)
-    const rectangle = createRefinementRectangle(region, imgElement)
+async function recognizeRegionOrientation(imgElement, region, selectedLang, orientation){
+    const {worker, language} = await getRefinementWorker(selectedLang, orientation)
+    const rectangle = createRefinementRectangle(region, imgElement, orientation)
+    const scale = calculateOCRScale(region, orientation)
+    const rawCanvas = createUpScaledRegionCanvas(imgElement,rectangle, scale)
+    const contrastCanvas = cloneCanvas(rawCanvas)
 
-    const scale = calculateOCRScale(region)
+    applyGrayscaleAndContrast(contrastCanvas, 1.4)
 
-    const rawCanvas = createUpScaledRegionCanvas(imgElement, rectangle, scale)
-    const processedCanvas = cloneCanvas(rawCanvas)
-    
-
-    applyGrayscaleAndContrast(processedCanvas, 1.4)
-
+    const psm = orientation === "vertical"
+        ? Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT
+        : region.lines?.length === 1
+            ? Tesseract.PSM.SINGLE_LINE
+            : Tesseract.PSM.SINGLE_BLOCK
     const raw = await recognizeRefinementCanvas(worker, rawCanvas, language, selectedLang, psm)
-    
-    const processed = await recognizeRefinementCanvas(worker, processedCanvas, language, selectedLang, psm)
+    const contrast = await recognizeRefinementCanvas(worker, contrastCanvas, language, selectedLang, psm)
 
-    const baseFirstPassCandidate = {
+    const candidates = [
+        {
+            ...raw,
+            preprocessing: "raw",
+            orientation,
+            language,
+            psm,
+            rectangle,
+            scale
+        },
+        {...contrast,
+            preprocessing: "contrast",
+            orientation,
+            language,
+            psm,
+            rectangle,
+            scale
+        }
+    ]
+    if(needsAggressiveRefinement(candidates)){
+        const aggressiveScale = Math.min(6, Math.max(scale, scale * 1.25))
+        const otsuCanvas = createUpScaledRegionCanvas(imgElement, rectangle, aggressiveScale)
+        applyOtsuThreshold(otsuCanvas)
+
+        const otsu = await recognizeRefinementCanvas(worker, otsuCanvas, language, selectedLang, psm)
+
+        candidates.push({
+            ...otsu,
+            preprocessing: "otsu",
+            orientation,
+            language,
+            psm,
+            rectangle,
+            scale: aggressiveScale
+        })
+    }
+    return candidates
+}
+
+async function recognizeRegionSecondPass(imgElement, region, selectedLang, mode){
+    let orientations
+
+    if(mode === OCR_MODE.MANGA && isCJKLanguage(selectedLang)){
+        orientations = ["horizontal", "vertical"]
+    }else if(isCJKLanguage(selectedLang)){
+        orientations = [getPreferredOrientation(selectedLang)]
+    }else {
+        orientations = [region.orientation]
+    }
+
+    const candidates = []
+
+    candidates.push({
         text: region.text,
         layoutText: region.rawText,
         words: region.lines.flatMap(line => line.words || []),
         confidence: region.confidence,
         preprocessing: "first-pass",
-        microCorrections: [],
+        orientation: region.orientation,
+        language: region.ocrLanguage || selectedLang,
+        psm: null,
+        rectangle: null,
         scale: 1
-    }
+    })
 
-    const candidates = [baseFirstPassCandidate]
-    const microAdjustedConfidence = calculateMicroAdjustedConfidence(region, microFirstPass.corrections)
-
-    if(microFirstPass.corrections.length){
-        candidates.push({
-            text: microFirstPass.text,
-            layoutText: region.rawText,
-            words: region.lines.flatMap(line => line.words || []),
-            confidence: microAdjustedConfidence,
-            preprocessing: "first-pass+micro",
-            microCorrections: microFirstPass.corrections,
-            scale: 1
-        })
-    }
-
-    candidates.push(
-        {
-            ...raw,
-            preprocessing: "raw",
-            scale
-        },
-        {
-            ...processed,
-            preprocessing: "contrast",
-            scale
-        }
-    )
-
-    if(needsAggressiveRefinement(candidates)){
-        const aggressiveScale = Math.min(6, Math.max(scale, scale * 1.25))
-        const otsuCanvas = createUpScaledRegionCanvas(imgElement, rectangle, aggressiveScale)
-
-        applyOtsuThreshold(otsuCanvas)
-
-        const otsu = await recognizeRefinementCanvas(
-            worker,
-            otsuCanvas,
-            language,
-            selectedLang,
-            psm
+    for(const orientation of orientations){
+        const orientationCandidates = await recognizeRegionOrientation(
+            imgElement, region, selectedLang, orientation 
         )
 
-        candidates.push({
-            ...otsu,
-            preprocessing: "otsu",
-            scale: aggressiveScale
-        })
+        candidates.push(...orientationCandidates)
     }
-    const hasStrongMicroCorrection = microFirstPass.corrections.length > 0
-        && microFirstPass.corrections.every( correction =>
-            correction.consensus === true && correction.microConfidence >= 70
-        )
-    const scoreReferenceText = hasStrongMicroCorrection ? microFirstPass.text : region.text
-    const best = selectBestOCRCandidate(candidates, scoreReferenceText)
-
-    debugOCR("OCR refinement candidates: ", 
+    const best = selectBestRegionOCRCandidate(candidates, region, selectedLang)
+    const firstPass = candidates[0]
+    const firstPassScore = scoreRegionOCRCandidate(firstPass, region, selectedLang, candidates)
+    
+    debugOCR("OCR orientation candidates: ",
         candidates.map(candidate => ({
+            orientation: candidate.orientation,
             preprocessing: candidate.preprocessing,
+            language: candidate.language,
+            psm: candidate.psm,
             text: candidate.text,
             confidence: candidate.confidence,
             scale: candidate.scale,
-            microCorrections: candidate.microCorrections || [],
-            score: scoreOCRCandidate(candidate, scoreReferenceText, candidates)
+            rectangle: candidate.rectangle,
+            score: scoreRegionOCRCandidate(candidate, region, selectedLang, candidates)
         }))
     )
-    debugOCR("OCR  refinement winner: ",
-        {
-            preprocessing: best.preprocessing,
-            text: best.text,
-            confidence: best.confidence,
-            score: best.score,
-            scale: best.scale
-        }
-    )
-
-    if(microFirstPass.corrections.length){
-        debugOCR("OCR micro-refinement: ", microFirstPass.corrections)
-    }
-    
-
-    return {
+    debugOCR("OCR orientation winner: ", {
+        previousOrientation: region.orientation,
+        orientation: best.orientation,
+        preprocessing: best.preprocessing,
         text: best.text,
+        confidence: best.confidence,
+        score: best.score,
+        firstPassScore
+    })
+    return {
+        text: best.text, 
         layoutText: best.layoutText,
         confidence: best.confidence,
         words: best.words,
         preprocessing: best.preprocessing,
-        microCorrections: best.microCorrections || [],
+        orientation: best.orientation,
+        language: best.language,
+        psm: best.psm,
+        rectangle: best.rectangle,
         scale: best.scale,
         score: best.score,
-        candidates,
-        language,
-        psm,
-        rectangle
+        firstPassScore,
+        candidates
     }
 }
 
-async function readImage(imageTarget, selectedLang, mode = OCR_MODE.AUTO){
-    const languages = getOCRLanguages(selectedLang)
-
-    debugOCR("OCR Language: ", {selected: selectedLang, loaded: languages})
-
+async function readDocumentImage(imageTarget, selectedLang){
     const worker = await getOCRWorker(selectedLang)
+    const vertical = isExplicitVerticalLanguage(selectedLang)
+    const primaryPSM = vertical ? Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT : Tesseract.PSM.AUTO
+    const primaryResult = await recognizeWorker(worker, imageTarget, primaryPSM)
+    const candidates = [{
+        name: vertical ? "DOCUMENT_VERTICAL" : "DOCUMENT_AUTO",
+        language: selectedLang,
+        result: primaryResult
+    }]
 
-    
-    if(mode === OCR_MODE.MANGA){
-        const result = await recognizeWorker(worker, imageTarget, Tesseract.PSM.SPARSE_TEXT)
-        return {
-            primary: { name: "SPARSE_TEXT", language: selectedLang, result},
-            candidates: [{name: "SPARSE_TEXT", language: selectedLang, result}]
-        }
-    }
+    if(inspectSparseMode(primaryResult, selectedLang)){
+        const sparseResult = await recognizeWorker(worker, imageTarget, Tesseract.PSM.SPARSE_TEXT)
 
-
-    if(mode === OCR_MODE.DOCUMENT){
-        const result = await recognizeWorker(worker, imageTarget, Tesseract.PSM.AUTO)
-        return {
-            primary: { name: "AUTO", language: selectedLang, result},
-            candidates: [{name: "AUTO", language: selectedLang, result}]
-        }
-    }
-
-    const autoResult = await recognizeWorker(worker, imageTarget, Tesseract.PSM.AUTO)
-
-    const shouldRetrySparse = inspectSparseMode(
-        autoResult,
-        selectedLang
-    )
-
-    if(!shouldRetrySparse){
-        return {
-            candidates: [{name: "AUTO", language: selectedLang,result: autoResult}]
-        }
-    }
-
-    console.log("AUTO pouco confiavel. Testando SPARSE_TEXT...")
-
-    const sparseResult = await recognizeWorker(worker, imageTarget, Tesseract.PSM.SPARSE_TEXT)
-
-     const candidates = [
-        {
-            name: "AUTO",
-            language: selectedLang,
-            result: autoResult
-        },
-        {
-            name: "SPARSE_TEXT",
+        candidates.push({
+            name: "DOCUMENT_SPARSE_FALLBACK",
             language: selectedLang,
             result: sparseResult
-        }
-    ]
-
-    if(isCJKLanguage(selectedLang)){
-        const {worker: verticalWorker, language:verticalLanguage} = await getRefinementWorker(selectedLang,"vertical")
-    
-        console.log("Testing dedicated vertical OCR: ", verticalLanguage)
-    
-        const verticalResult = await recognizeWorker(verticalWorker,imageTarget,Tesseract.PSM.SPARSE_TEXT)
-    
-        candidates.push({
-            name: "VERTICAL_SPARSE_TEXT",
-            language: verticalLanguage,
-            result: verticalResult
         })
     }
+    finalizeOCRCandidates(candidates, selectedLang)
 
-    for(const candidate of candidates){
-        candidate.score = scoreInitialOCRResult(candidate.result, candidate.language || selectedLang)
+    return {
+        requestedMode: OCR_MODE.DOCUMENT,
+        mode: OCR_MODE.DOCUMENT,
+        candidates
+    }
+}
+
+async function readMangaImage(imageTarget, selectedLang){
+    const baseLanguage = getBaseLanguage(selectedLang)
+    const {worker: horizontalWorker, language: horizontalLanguage} = await getRefinementWorker(baseLanguage, "horizontal")
+    const {worker: verticalWorker, language: verticalLanguage} = await getRefinementWorker(baseLanguage, "vertical")
+    const candidates = []
+    const horizontalResult = await recognizeWorker(horizontalWorker, imageTarget, Tesseract.PSM.SPARSE_TEXT)
+
+    candidates.push({
+        name: "MANGA_HORIZONTAL",
+        language: horizontalLanguage,
+        result: horizontalResult
+    })
+
+    const verticalResult = await recognizeWorker(verticalWorker, imageTarget, Tesseract.PSM.SPARSE_TEXT)
+
+    candidates.push({
+        name: "MANGA_VERTICAL",
+        language: verticalLanguage,
+        result: verticalResult
+    })
+
+    const rescueScale = 2
+    const scaledImage = createScaledOCRCanvas(imageTarget, rescueScale)
+    const horizontal2xRaw = await recognizeWorker(horizontalWorker, scaledImage, Tesseract.PSM.SPARSE_TEXT)
+    const horizontal2x = rescaleOCRResult(horizontal2xRaw, rescueScale)
+
+    candidates.push({
+        name: "MANGA_HORIZONTAL_2X",
+        language: horizontalLanguage,
+        result: horizontal2x
+    })
+
+    const vertical2xRaw = await recognizeWorker(verticalWorker, scaledImage, Tesseract.PSM.SPARSE_TEXT)
+    const vertical2x = rescaleOCRResult(vertical2xRaw, rescueScale)
+
+    candidates.push({
+        name: "MANGA_VERTICAL_2X",
+        language: verticalLanguage,
+        result: vertical2x
+    })
+
+    finalizeOCRCandidates(candidates, selectedLang)
+
+    return {requestedMode: OCR_MODE.MANGA, mode: OCR_MODE.MANGA, candidates}
+}
+
+async function readAutoImage(imageTarget, selectedLang){
+    const worker = await getOCRWorker(selectedLang)
+    const vertical = isExplicitVerticalLanguage(selectedLang)
+    const documentPSM = vertical ? Tesseract.PSM.SINGLE_BLOCK_VERT_TEXT : Tesseract.PSM.AUTO
+    const documentResult = await recognizeWorker(worker, imageTarget, documentPSM)
+    const unreliable = inspectSparseMode(documentResult, selectedLang)
+
+    if(!unreliable){
+        const candidates = [{
+            name: "AUTO_DOCUMENT",
+            language: selectedLang,
+            result: documentResult
+        }]
+
+        finalizeOCRCandidates(candidates,selectedLang)
+
+        debugOCR("OCR auto resolved mode: ", OCR_MODE.DOCUMENT)
+
+        return {requestedMode: OCR_MODE.AUTO, mode: OCR_MODE.DOCUMENT, candidates}
     }
 
-    candidates.sort((a, b) => b.score - a.score)
+    debugOCR("OCR auto resolved mode: ", OCR_MODE.MANGA)
 
-    debugOCR("OCR initial candidates: ", 
-        candidates.map(candidate => ({
-            mode: candidate.name,
-            language: candidate.language,
-            score: candidate.score,
-            stats: getOCRResultStats(candidate.result, candidate.language || selectedLang)
-        }))
-    )
+    const mangaResult = await readMangaImage(imageTarget, selectedLang)
 
-    debugOCR("OCR initial winner: ", candidates[0].name)
+    return {...mangaResult, requestedMode: OCR_MODE.AUTO, mode: OCR_MODE.MANGA}
+}
 
-    return {candidates}
-    
+async function readImage(imageTarget, selectedLang, mode = OCR_MODE.AUTO){
+    const normalizedMode = normalizeOCRMode(mode)
+
+    debugOCR("OCR configuration:", { 
+        requestedMode: normalizedMode,
+        language: selectedLang,
+        preferredOrientation: getPreferredOrientation(selectedLang)
+    })
+
+    switch(normalizedMode){
+        case OCR_MODE.MANGA:
+            return await readMangaImage(imageTarget, selectedLang)
+
+        case OCR_MODE.DOCUMENT:
+            return await readDocumentImage(imageTarget, selectedLang)
+        case OCR_MODE.AUTO:
+            default:
+                return await readAutoImage(imageTarget, selectedLang)
+    }
 }
 
 function getOCRResultStats(ocrData, selectedLang){
@@ -1829,99 +1373,19 @@ function getOCRResultStats(ocrData, selectedLang){
     }
 }
 
-function isStructurallyReliableRegion(region){
-    if(!region.lines?.length) return false
-
-    const words = region.lines.flatMap(line => line.words || [])
-
-    if(!words.length) return false
-
-    const veryLowConfidence = words.filter(word => 
-        (Number(word.confidence) || 0) < 15).length
-
-    const ratio = veryLowConfidence / words.length
-
-    return ratio < 0.25
-}
-
 function normalizeForComparison(text){
     return (text || "").replace(/\s+/g, "").trim()
 }
 
-function scoreOCRCandidate(candidate, firstPassText, allCandidates = []){
-    if(!candidate.text) return -Infinity
-
-    let score = Number(candidate.confidence) || 0
-
-    const candidateText = normalizeForComparison(candidate.text)
-    const firstText = normalizeForComparison(firstPassText)
-    const candidateLength = [...candidateText].length
-    const originalLength = [...firstText].length
-
-    if(originalLength > 0){
-        const ratio = candidateLength / originalLength
-
-        if(ratio < 0.6){
-            score -= 40
-        }else if(ratio < 0.75){
-            score -= 20
-        }
-
-        if(ratio >= 0.85 && ratio <= 1.15){
-            score += 5
-        }
-    }
-
-    if(candidateText && candidateText === firstText){
-        score += 8
-    }
-
-    for(const other of allCandidates){
-        if(other === candidate) continue
-
-        const otherText = normalizeForComparison(other.text)
-
-        if(candidateText && candidateText === otherText){
-            score += 10
-        }
-    }
-
-    if(candidate.preprocessing === "raw"){
-        score += 1
-    }
-
-    if(candidate.preprocessing === "otsu"){
-        score -= 1
-    }
-
-    if(candidate.microCorrections?.length) {
-        for(const correction of candidate.microCorrections){
-            if(correction.consensus){
-                score += 5
-            }else{
-                score += 2
-            }
-        }
-    }
-
-    return score
-}
-
-function selectBestOCRCandidate(candidates, firstPassText){
-    return [...candidates]
-    .map(candidate => ({...candidate, score: scoreOCRCandidate(candidate, firstPassText, candidates)}))
-    .sort((a, b) => b.score - a.score)[0]
-}
-
-function calculateOCRScale(region){
+function calculateOCRScale(region, orientation = region.orientation){
     if(!region.lines?.length) return 3
 
     const sizes = region.lines.map(line => {
-        if(line.orientation === "vertical"){
+        if(orientation === "vertical"){
             return bboxWidth(line.bbox)
         }
         return bboxHeight(line.bbox)
-    })
+    }).filter(size => Number.isFinite(size) && size > 0)
 
     const averageSize = averageBbox(sizes)
     const targetSize = 60
@@ -2064,7 +1528,11 @@ function scoreOCRRegion(region, selectedLang){
 
     const confidence = Number(region.confidence) || 0
 
-    return (cjkCount * 12 + meaningful.length * 3 + confidence)
+    const preferredOrientation = getPreferredOrientation(selectedLang)
+
+    const orientationBonus = region.orientation === preferredOrientation ? 10 : 0
+
+    return (cjkCount * 12 + meaningful.length * 3 + confidence + orientationBonus)
 }
 
 function mergeOCRCandidateRegions(ocrData, selectedLang){
@@ -2077,9 +1545,17 @@ function mergeOCRCandidateRegions(ocrData, selectedLang){
     for(const candidate of candidateData){
         if(!candidate?.result) continue
 
-        const candidateLanguage = candidate?.language || selectedLang
+        const candidateLanguage = candidate.language || selectedLang
         const structure = buildOCRStructure(candidate.result, candidateLanguage)
-        console.log(`OCR regions from ${candidate.name}:`, structure.regions)
+
+        debugOCR(`OCR regions from ${candidate.name}:`,
+            structure.regions.map(region => ({
+                text: region.text,
+                confidence: region.confidence,
+                orientation: region.orientation,
+                bbox: region.bbox
+            }))
+        )
 
         for(const region of structure.regions){
             allRegions.push({
@@ -2096,14 +1572,37 @@ function mergeOCRCandidateRegions(ocrData, selectedLang){
     const merged = []
 
     for(const region of allRegions){
-        const duplicate = merged.some(existing => {
-            const overlap = ocrRegionOverlap(existing, region)
-            return(overlap >= 0.60)
-        })
+        const duplicateIndex = merged.findIndex(existing =>
+            ocrRegionOverlap(existing, region) >= 0.6
+        )
 
-        if(duplicate) continue
+        if(duplicateIndex === -1){
+            merged.push({
+                ...region,
+                ocrSupportSources: [region.ocrSource],
+                ocrSupportCount: 1
+            })
+            continue
+        }
+        const existing = merged[duplicateIndex]
+        const supportSources = new Set([
+            ...(existing.ocrSupportSources || []),
+            region.ocrSource
+        ])
 
-        merged.push(region)
+        const existingScore = scoreOCRRegion(existing, selectedLang)
+        const incomingScore = scoreOCRRegion(region, selectedLang)
+
+        if(incomingScore > existingScore){
+            merged[duplicateIndex] = {
+                ...region,
+                ocrSupportSources: [...supportSources],
+                ocrSupportCount: supportSources.size
+            }
+        }else{
+            existing.ocrSupportSources = [...supportSources]
+            existing.ocrSupportCount = supportSources.size
+        }
     }
 
     return merged.map((region, index) => ({
@@ -2232,20 +1731,26 @@ function canMergeLineIntoRegion(region,line, selectedLang){
             (horizontalOverlap > 0.20 || centerDifference < maxWidth * 0.25))
     }
 
-    const horizontalGap = axisGap(regionBox.x0, regionBox.x1, lineBox.x0, lineBox.x1)
-    const verticalOverlap = overlapRatio(regionBox.y0, regionBox.y1, lineBox.y0, lineBox.y1)
-    const centerDifference = Math.abs(bboxCenterY(regionBox) - bboxCenterY(lineBox))
-    const maxHeight = Math.max(bboxHeight(regionBox), bboxHeight(lineBox))
-    const maxGap = Math.max(regionThickness, lineThickness) * 1.7
+    const neighborMetrics = region.lines.map(existingLine => {
+        const existingBox = existingLine.bbox
 
-    if(usesNoWordSpaces(selectedLang) && verticalOverlap > 0.55){
-        const cjkMaxGap = Math.max(regionThickness, lineThickness) * 2.5
+        return {
+            horizontalGap: axisGap(existingBox.x0, existingBox.x1, lineBox.x0, lineBox.x1),
+            verticalOverlap: overlapRatio(existingBox.y0, existingBox.y1, lineBox.y0, lineBox.y1),
+            thickness: bboxWidth(existingBox)
+        }
+    })
 
-        return (horizontalGap <= cjkMaxGap)
-    }
+    const compatibleNeighbors = neighborMetrics.filter(neighbor => neighbor.verticalOverlap > 0.35)
 
-    return (horizontalGap <= maxGap && 
-        (verticalOverlap > 0.15 || centerDifference < maxHeight * 0.40))
+    if(!compatibleNeighbors.length) return false
+
+    compatibleNeighbors.sort((a, b) => a.horizontalGap - b.horizontalGap)
+
+    const nearest = compatibleNeighbors[0]
+    const maxGap = Math.max(lineThickness, nearest.thickness) * (usesNoWordSpaces(selectedLang) ? 1.8 : 1.5)
+
+    return (nearest.horizontalGap <= maxGap)
 }
 
 function regionDistance(region,line){
@@ -2363,8 +1868,41 @@ async function getOCRSafeImage(pageImage){
     return await loadImageFromSource(response.dataUrl)
 }
 
+
+//comunicação com o ollama
+
+function getLowConfidenceOCRWords(region, threshold = 40){
+    return region.lines?.flatMap(line => line.words || [])
+        .filter(word => (Number(word.confidence) || 0) < threshold)
+        .map(word => ({
+            text: word.text,
+            confidence: Number(word.confidence) || 0
+        })) || []
+}
+
+export async function translateOCRRegion(region, sourceLanguage, targetLanguage){
+    if(!region?.text) return null
+
+    const lowConfidenceWords = getLowConfidenceOCRWords(region)
+
+    const response = await chrome.runtime.sendMessage({
+        type: "OLLAMA_TRANSLATE",
+        payload: {
+            text: region.text,
+            sourceLanguage: getBaseLanguage(sourceLanguage),
+            targetLanguage,
+            lowConfidenceWords
+        }
+    })
+    if(!response) throw new Error("Background returned no response")
+    if(!response.ok) throw new Error(response.error || "Ollama translation failed")
+
+    return response.result
+    } 
+
 async function drawTranslationBlocks(ocrData, ocrImage, displayImage, sourceLanguage, targetLanguage){
 
+    const resolvedMode = ocrData.mode || OCR_MODE.AUTO
 
     const firstPassRegions = mergeOCRCandidateRegions(ocrData, sourceLanguage)
 
@@ -2375,11 +1913,13 @@ async function drawTranslationBlocks(ocrData, ocrImage, displayImage, sourceLang
             text: region.text,
             confidence: region.confidence,
             orientation: region.orientation,
-            bbox: region.bbox
+            bbox: region.bbox,
+            supportCount: region.ocrSupportCount,
+            supportSources: region.ocrSupportSources
         }))
     )
 
-    const regions = await refineTextRegions(firstPassRegions, ocrImage, sourceLanguage)
+    const regions = await refineTextRegions(firstPassRegions, ocrImage, sourceLanguage, resolvedMode)
 
     if(regions.length === 0) {
         console.warn("No region found") 
@@ -2400,7 +1940,7 @@ async function drawTranslationBlocks(ocrData, ocrImage, displayImage, sourceLang
 
     for(const [index, region] of regions.entries()){
 
-        if(isProbablyNoiseRegion(region, sourceLanguage)){
+        if(isProbablyNoiseRegion(region, sourceLanguage, resolvedMode)){
             debugOCR("OCR region removed as noise:", region)
             continue;
         }
@@ -2493,38 +2033,6 @@ async function drawTranslationBlocks(ocrData, ocrImage, displayImage, sourceLang
     await Promise.allSettled(translationJobs)
 }
 
-
-//comunicação com o ollama
-
-function getLowConfidenceOCRWords(region, threshold = 40){
-    return region.lines?.flatMap(line => line.words || [])
-        .filter(word => (Number(word.confidence) || 0) < threshold)
-        .map(word => ({
-            text: word.text,
-            confidence: Number(word.confidence) || 0
-        })) || []
-}
-
-export async function translateOCRRegion(region, sourceLanguage, targetLanguage){
-    if(!region?.text) return null
-
-    const lowConfidenceWords = getLowConfidenceOCRWords(region)
-
-    const response = await chrome.runtime.sendMessage({
-        type: "OLLAMA_TRANSLATE",
-        payload: {
-            text: region.text,
-            sourceLanguage,
-            targetLanguage,
-            lowConfidenceWords
-        }
-    })
-    if(!response) throw new Error("Background returned no response")
-    if(!response.ok) throw new Error(response.error || "Ollama translation failed")
-
-    return response.result
-    } 
-
 //botao temporario para traducao
 function setupImageHover() {
     const images = document.querySelectorAll('img')
@@ -2586,10 +2094,11 @@ function setupImageHover() {
 
             translationBtn.innerText = 'Reading...'
 
-            chrome.storage.local.get(['langFrom', 'langTo'], async (data) => {
+            chrome.storage.local.get(['langFrom', 'langTo', 'ocrMode'], async (data) => {
                 
                 const sourceLanguage = data.langFrom
                 const targetLanguage = data.langTo
+                const ocrMode = normalizeOCRMode(data.ocrMode)
 
                 if(!sourceLanguage || !targetLanguage){
                     debugOCRError("Nenhum idioma de origem configurado")
@@ -2606,6 +2115,8 @@ function setupImageHover() {
                     runId,
                     sourceLanguage,
                     targetLanguage,
+                    ocrMode,
+                    preferredOrientation: getPreferredOrientation(sourceLanguage),
                     image: {
                         src: currentImage?.currentSrc || currentImage?.src,
                         width: currentImage?.naturalWidth,
@@ -2620,7 +2131,7 @@ function setupImageHover() {
                 try{
                     translationBtn.innerText = "Reading..."
                     const ocrImage = await getOCRSafeImage(targetImage)
-                    const ocrData = await readImage(ocrImage, sourceLanguage, OCR_MODE.AUTO)
+                    const ocrData = await readImage(ocrImage, sourceLanguage, ocrMode)
 
                     if(runId !== ocrRunId) return
 
