@@ -18,7 +18,14 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["scripts/debug.js"],
+      "resources": 
+      [
+        "scripts/debug.js", 
+        "models/comic-text-detector/comictextdetector.pt.onnx",
+        "runtime/onnx/ort-wasm-simd-threaded.mjs",
+        "runtime/onnx/ort-wasm-simd-threaded.wasm",
+        "assets/image/test.png"
+      ],
       "matches": ["<all_urls>"]
     }
   ]
