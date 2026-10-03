@@ -600,45 +600,29 @@ export function showTranslationPreview(image, translatedCrops){
 }
 
 export function renderTranslationOverImage(imageElement, translatedCrops){
-    const rect = imageElement.getBoundingClientRect()
-    const scaleX = rect.width / imageElement.naturalWidth
-    const scaleY = rect.height / imageElement.naturalHeight
 
-    console.log("Imagem exibida: ", {
-        naturalWidth: imageElement.naturalWidth,
-        naturalHeight: imageElement.naturalHeight,
-        displayedWidth: rect.width,
-        displayedHeight: rect.height,
-        scaleX,
-        scaleY
-    })
+    const oldLayer = imageElement.__homebrewTranslationLayer
+
+    if(oldLayer) oldLayer.remove()
 
     const layer = document.createElement("div")
     layer.className = "homebrew-translation-layer"
 
     layer.style.position = "absolute"
-    layer.style.left = `${rect.left + window.scrollX}px`
-    layer.style.top = `${rect.top + window.scrollY}px`
-    layer.style.width = `${rect.width}px`
-    layer.style.height = `${rect.height}px`
     layer.style.pointerEvents = "none"
     layer.style.zIndex = "204"
 
     document.body.appendChild(layer)
 
+    const overlays = []
+
     translatedCrops.forEach(item => {
         if(!item.translation?.trim()) return
 
-        const box = item.box
         const overlay = document.createElement("div")
 
-        overlay.className = "homebrew-translation-box"
         overlay.textContent = item.translation
         overlay.style.position = "absolute"
-        overlay.style.left = `${box.x1 * scaleX}px`
-        overlay.style.top = `${box.y1 * scaleY}px`
-        overlay.style.width = `${box.width * scaleX}px`
-        overlay.style.height = `${box.height * scaleY}px`
         overlay.style.boxSizing = "border-box"
         overlay.style.padding = "3px"
         overlay.style.background = "rgba(255,255,255, 0.94)"
@@ -657,11 +641,61 @@ export function renderTranslationOverImage(imageElement, translatedCrops){
 
         layer.appendChild(overlay)
 
-        const fitting = fitTextToBox(overlay, 24, 6)
-
-        console.log(`Overlay ${item.index}: `, fitting)
+        overlays.push({element: overlay, item})
     })
-    document.body.appendChild(layer)
 
-    return layer
+    function syncOverlay(){
+        const rect = imageElement.getBoundingClientRect()
+
+        if(rect.width <= 0 || rect.height <= 0){
+            layer.style.display = "none"
+            return
+        }
+
+        layer.style.display = "block"
+        layer.style.left = `${rect.left + window.scrollX}px`
+        layer.style.top = `${rect.top + window.scrollY}px`
+        layer.style.width = `${rect.width}px`
+        layer.style.height = `${rect.height}px`
+
+
+        const scaleX = rect.width / imageElement.naturalWidth
+        const scaleY = rect.height / imageElement.naturalHeight
+
+        overlays.forEach(({element, item}) => {
+            const box = item.box
+
+            element.style.left = `${box.x1 * scaleX}px`
+            element.style.top = `${box.y1 * scaleY}px`
+            element.style.width = `${box.width * scaleX}px`
+            element.style.height = `${box.height * scaleY}px`
+
+            fitTextToBox(element, 24, 6)
+
+        })
+    }
+
+    let syncSchedule = false
+    function scheduleSync(){
+        if(syncSchedule) return
+
+        syncSchedule = true
+
+        requestAnimationFrame(() => {
+            syncSchedule = false
+            syncOverlay()
+        })
+    }
+
+    const resizeObserver = new ResizeObserver(() => {scheduleSync()})
+
+    resizeObserver.observe(imageElement)
+    window.addEventListener("resize", scheduleSync)
+    window.addEventListener("scroll", scheduleSync, {passive: true})
+
+    syncOverlay()
+
+    imageElement.__homebrewTranslationLayer = layer
+
+    return {layer, resizeObserver, syncOverlay}
 }
