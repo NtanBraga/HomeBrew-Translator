@@ -1,4 +1,4 @@
-import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes } from "./manga/comicTextDetector"
+import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops } from "./manga/comicTextDetector"
 
 const OCR_DEBUG = {events: []}
 
@@ -115,6 +115,11 @@ loadComicTextDetector().then(async session => {
     const detection = await runComicTextDetector(preprocess.tensor, preprocess.transform)
     debugOCR("Inferência concluida: ", detection.boxes)
 
+    const crops = cropTextBlocks(preprocess.image, detection.boxes)
+    console.log("Crops criados: ", crops.length)
+
+    showDebugCrops(crops)
+
     const debugCanvas = drawDebugBoxes(preprocess.image, detection.boxes)
 
     debugCanvas.style.position = "fixed"
@@ -128,6 +133,7 @@ loadComicTextDetector().then(async session => {
     debugCanvas.style.border = "2px solid black"
 
     document.body.appendChild(debugCanvas)
+
 
 }).catch(error => {
     debugOCRError("Erro: ", error)

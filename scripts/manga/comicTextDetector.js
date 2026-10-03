@@ -393,3 +393,96 @@ export async function runComicTextDetector(tensor, transform){
 
     return {boxes, segmentation: outputs.seg, lineDetection: outputs.det}
 }
+
+//crop text blocks
+
+export function cropTextBlocks(image, boxes){
+    const crops = []
+
+    boxes.forEach((box, index) => {
+        const boxWidth = box.x2 - box.x1
+        const boxHeight = box.y2 - box.y1
+
+        const padding = Math.max(4, Math.round(Math.min(boxWidth, boxHeight) * 0.05))
+        const x1 = Math.max(0, Math.floor(box.x1 - padding))
+        const y1 = Math.max(0, Math.floor(box.y1 - padding))
+        const x2 = Math.min(image.naturalWidth, Math.ceil(box.x2 + padding))
+        const y2 = Math.min(image.naturalHeight, Math.ceil(box.y2 + padding))
+
+        const width = x2 - x1
+        const height = y2 - y1
+
+        if(width <= 0 || height <= 0) return
+
+        const canvas = document.createElement("canvas")
+        canvas.width = width
+        canvas.height = height
+
+        const context = canvas.getContext("2d")
+
+        if(!context) throw new Error("Não foi possivel criar canvas para crop")
+
+        context.drawImage(
+            image,
+            //source
+            x1,
+            y1,
+            width,
+            height,
+            //destination
+            0,
+            0,
+            width,
+            height
+        )
+
+        crops.push({
+            index,
+            canvas,
+            box,
+            crop: {
+                x: x1,
+                y: y1,
+                width,
+                height
+            }
+        })
+    })
+    return crops
+}
+
+export function showDebugCrops(crops){
+    const container = document.createElement("div")
+
+    container.style.position = "fixed"
+    container.style.left = "10px"
+    container.style.top = "10px"
+    container.style.maxHeight = "90vh"
+    container.style.width = "260px"
+    container.style.overflowY = "auto"
+    container.style.background = "white"
+    container.style.border = "2px solid black"
+    container.style.padding = "8px"
+    container.style.zIndex = 201
+
+    crops.forEach(item => {
+        const wrapper = document.createElement("div")
+        wrapper.style.marginBottom = "12px"
+        const title = document.createElement("div")
+        title.textContent = `Block ${item.index} - ${(item.box.confidence * 100).toFixed(1)}%`
+        title.style.color = "black"
+        title.style.fontSize = "14px"
+        
+        item.canvas.style.maxWidth = "100%"
+        item.canvas.style.height = "auto"
+        item.canvas.style.border = "1px solid #999"
+
+        wrapper.appendChild(title)
+        wrapper.appendChild(item.canvas)
+
+        container.appendChild(wrapper)
+    })
+    document.body.appendChild(container)
+
+    return container
+}
