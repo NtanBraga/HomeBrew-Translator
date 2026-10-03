@@ -486,3 +486,115 @@ export function showDebugCrops(crops){
 
     return container
 }
+
+//visual translation
+
+function fitTextToBox(element, maxFontSize = 24, minFontSize = 6){
+    let min = minFontSize
+    let max = maxFontSize
+    let best = null
+
+    while(min <= max){
+        const size = Math.floor((min + max) / 2)
+
+        element.style.fontSize = `${size}px`
+
+        const fitsWidth = element.scrollWidth <= element.clientWidth 
+        const fitsHeight = element.scrollHeight <= element.clientHeight
+
+        if(fitsHeight && fitsWidth){
+            best = size
+            min = size + 1
+        }else{
+            max = size - 1
+        }
+    }
+
+    if(best !== null){
+        element.style.fontSize = `${best}px`
+        
+        return {
+            fits: true,
+            fontSize: best
+        }
+    }
+
+    element.style.fontSize = `${minFontSize}px`
+
+    return {
+        fits: false,
+        fontSize: minFontSize
+    }
+}
+
+export function showTranslationPreview(image, translatedCrops){
+    const viewport = document.createElement("div")
+
+    viewport.style.position = "fixed"
+    viewport.style.top = "10px"
+    viewport.style.right = "10px"
+    viewport.style.maxWidth = "60vw"
+    viewport.style.maxHeight = "95vh"
+    viewport.style.overflow = "auto"
+    viewport.style.background = "white"
+    viewport.style.border = "2px solid black"
+    viewport.style.zIndex = "202"
+
+    const wrapper = document.createElement("div")
+
+    wrapper.style.position = "relative"
+    wrapper.style.width = `${image.naturalWidth}px`
+    wrapper.style.height = `${image.naturalHeight}px`
+
+    const imageElement = document.createElement("img")
+
+    imageElement.src = image.src
+
+    imageElement.style.position = "absolute"
+    imageElement.style.left = "0"
+    imageElement.style.top = "0"
+    imageElement.style.width = `${image.naturalWidth}px`
+    imageElement.style.height = `${image.naturalHeight}px`
+
+    wrapper.appendChild(imageElement)
+    viewport.appendChild(wrapper)
+    document.body.appendChild(viewport)
+
+    translatedCrops.forEach(item => {
+        if(!item.translation?.trim()) return
+
+        const box = item.box
+        const overlay = document.createElement("div")
+
+        overlay.textContent = item.translation
+        
+        overlay.style.position = "absolute"
+        overlay.style.left = `${box.x1}px`
+        overlay.style.top = `${box.y1}px`
+        overlay.style.width = `${box.width}px`
+        overlay.style.height = `${box.height}px`
+        overlay.style.boxSizing = "border-box"
+        overlay.style.padding = "4px"
+        overlay.style.background = "rgba(255, 255, 255, 0.92)"
+        overlay.style.border = "1px solid red"
+        overlay.style.color = "black"
+        overlay.style.display = "flex"
+        overlay.style.alignItems = "center"
+        overlay.style.justifyContent = "center"
+        overlay.style.textAlign = "center"
+        overlay.style.whiteSpace = "normal"
+        overlay.style.overflowWrap = "break-word"
+        overlay.style.wordBreak = "normal"
+        overlay.style.overflow = "hidden"
+        overlay.style.fontFamily = "Arial, sans-serif"
+        overlay.style.lineHeight = "1.1"
+        overlay.style.pointerEvents = "none"
+
+        wrapper.appendChild(overlay)
+        const fitting = fitTextToBox(overlay, 24, 6)
+
+        console.log(`Crop ${item.index}: `, fitting)
+    })
+
+    return viewport
+}

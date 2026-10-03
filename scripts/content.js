@@ -1,4 +1,4 @@
-import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops } from "./manga/comicTextDetector"
+import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview } from "./manga/comicTextDetector"
 
 const OCR_DEBUG = {events: []}
 
@@ -256,8 +256,10 @@ loadComicTextDetector().then(async session => {
         }))
     )
 
+    showTranslationPreview(preprocess.image, translatedCrops)
 
-    showDebugCrops(crops)
+
+    //showDebugCrops(crops)
 
     const debugCanvas = drawDebugBoxes(preprocess.image, detection.boxes)
 
