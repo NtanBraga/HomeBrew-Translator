@@ -1,9 +1,16 @@
-import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector } from "./manga/comicTextDetector"
+import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes } from "./manga/comicTextDetector"
 
 const OCR_DEBUG = {events: []}
 
 
 function debugOCR(label, value){
+    
+    if(value !== undefined){
+        console.log(`[OCR DEBUG] ${label}`, value)
+    }else{
+        console.log(`[OCR DEBUG] ${label}`)
+    }
+
     let snapshot = value
 
     try{
@@ -24,7 +31,11 @@ function debugOCR(label, value){
 }
 
 function debugOCRError(label,error){
-    console.error(label, error)
+    if(error !== undefined){
+        console.log(`[OCR ERROR] ${label}`, error)
+    }else{
+        console.log(`[OCR ERROR] ${label}`)
+    }
 
     OCR_DEBUG.events.push({
         time: new Date().toISOString(),
@@ -94,13 +105,34 @@ testComicTextDetectorFile().then(() => {
     debugOCRError("Erro carregando Comic Text Detector: ", error)
 })
 
-loadComicTextDetector().then(session => {
-    debugOCR("Comic Text Detector pronto")
-    debugOCR("Input: ", session.inputNames)
-    debugOCR("Output: ", session.outputNames)
+loadComicTextDetector().then(async session => {
+    debugOCR("CTD pronto: ", session.inputNames)
+
+    const preprocess = await testImagePreprocessing()
+    debugOCR("Pre-processamento concluido: ", preprocess)
+
+    
+    const detection = await runComicTextDetector(preprocess.tensor, preprocess.transform)
+    debugOCR("Inferência concluida: ", detection.boxes)
+
+    const debugCanvas = drawDebugBoxes(preprocess.image, detection.boxes)
+
+    debugCanvas.style.position = "fixed"
+    debugCanvas.style.top = "10px"
+    debugCanvas.style.right = "10px"
+    debugCanvas.style.maxWidth = "50vw"
+    debugCanvas.style.maxHeight = "90vh"
+    debugCanvas.style.width = "auto"
+    debugCanvas.style.height = "auto"
+    debugCanvas.style.zIndex = "200"
+    debugCanvas.style.border = "2px solid black"
+
+    document.body.appendChild(debugCanvas)
+
 }).catch(error => {
-    debugOCRError("Erro inicializando CTD: ", error)
+    debugOCRError("Erro: ", error)
 })
+
 
 
 
