@@ -262,6 +262,40 @@ async function preparePageImage(imageElement){
     }
 }
 
+async function processMangaImage(imageElement, imageIndex) {
+    debugOCR(`Processando imagem ${imageIndex}`)
+
+    try{
+        imageElement.dataset.homebrewOcrStatus = "processing"
+
+        const preprocess = await preparePageImage(imageElement)
+        const detection = await runComicTextDetector(preprocess.tensor, preprocess.transform)
+
+        console.log(`Imagem ${imageIndex}: `, detection.boxes.length, " blocos encontrados")
+
+        if(detection.boxes.length === 0){
+            imageElement.dataset.homebrewOcrStatus = "done"
+
+            return
+        }
+
+        const crops = cropTextBlocks(preprocess.image, detection.boxes)
+        const recognizedCrops = await recognizeAllMangaCrops(crops)
+        const translatedCrops = await translateAllMangaCrops(recognizedCrops)
+        const overlayController = renderTranslationOverImage(imageElement, translatedCrops)
+
+        imageElement.__homebrewOverlayController = overlayController
+        imageElement.dataset.homebrewOcrStatus = "translated"
+        
+        console.log(`Imagem ${imageIndex} concluida`)
+
+    }catch(e){
+        imageElement.dataset.homebrewOcrStatus = "error"
+
+        debugOCRError(`Erro processando imagem ${imageIndex}`, error)
+    }
+}
+
 // ComicTextDetector && onnxRunTime config
 
 debugOCR("Iniciando content.js")
@@ -285,8 +319,6 @@ loadComicTextDetector().then(async session => {
 
     if(candidates.length === 0)throw new Error("Nenhuma imagem candidata encontrada na pagina")
 
-    const pageImage = candidates[0]
-
     debugOCR("Imagens candidatas: ",
         candidates.map((image, index) => ({
             index,
@@ -298,37 +330,11 @@ loadComicTextDetector().then(async session => {
         }))
     )
 
-    // const preprocess = await testImagePreprocessing()
-    const preprocess = await preparePageImage(pageImage)
-    debugOCR("Pre-processamento concluido: ", preprocess)
-    
-    const detection = await runComicTextDetector(preprocess.tensor, preprocess.transform)
-    debugOCR("Inferência concluida: ", detection.boxes)
+    for(let i = 0; i < candidates.length; i++){
+        await processMangaImage(candidates[i], i)
+    }
 
-    const crops = cropTextBlocks(preprocess.image, detection.boxes)
-    console.log("Crops criados: ", crops.length)
-
-    const recognizedCrops = await recognizeAllMangaCrops(crops)
-    debugOCR("OCR dos crops concluidos: ",
-        recognizedCrops.map(item => ({
-            index: item.index,
-            text: item.text,
-            confidence: item.box.confidence
-        }))
-    ) 
-
-    const translatedCrops = await translateAllMangaCrops(recognizedCrops)
-    debugOCR("Traduções concluidas: ",
-        translatedCrops.map(item => ({
-            index: item.index,
-            original: item.text,
-            corrected: item.correctedText,
-            translation: item.translation,
-            corrections: item.corrections
-        }))
-    )
-
-    renderTranslationOverImage(pageImage, translatedCrops)
+    debugOCR("Todas as imagens foram processadas.")
 
     //showTranslationPreview(preprocess.image, translatedCrops)
 
