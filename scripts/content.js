@@ -1,4 +1,4 @@
-import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview } from "./manga/comicTextDetector"
+import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview, loadImage, preprocessImage, renderTranslationOverImage } from "./manga/comicTextDetector"
 
 const OCR_DEBUG = {events: []}
 
@@ -209,6 +209,59 @@ async function translateAllMangaCrops(recognizedCrops) {
     return results
 }
 
+// find image candidate
+
+function findPageImageCandidates(){
+    const images = Array.from(document.images)
+    const candidates = images.filter(image => {
+        const src = image.currentSrc || image.src
+
+        if(!src) return false
+        if(!src.startsWith("http://") && !src.startsWith("https://")) return false
+        if(!image.complete) return false
+        if(image.naturalWidth < 300 || image.naturalHeight < 300) return false
+
+        const rect = image.getBoundingClientRect()
+        if(rect.width <= 0 || rect.height <= 0) return false
+
+        return true
+    })
+
+    candidates.sort((a,b) => {
+        const areaA = a.naturalWidth * a.naturalHeight
+        const areaB = b.naturalWidth * b.naturalHeight
+
+        return areaB - areaA
+    })
+    return candidates
+}
+
+async function fetchPageImageasDataUrl(imageElement){
+    const url = imageElement.currentSrc || imageElement.src
+    const response = await chrome.runtime.sendMessage({
+        type: "FETCH_IMAGE_FOR_OCR",
+        url
+    })
+
+    if(!response?.ok){
+        throw new Error(response?.error || `Não foi possivel buscar imagem: ${url}`)
+    }
+
+    return response.dataUrl
+}
+
+async function preparePageImage(imageElement){
+    const dataUrl = await fetchPageImageasDataUrl(imageElement)
+    const image = await loadImage(dataUrl)
+    const preprocess = preprocessImage(image)
+
+    return{
+        imageElement,
+        image,
+        ...preprocess
+    }
+}
+
 // ComicTextDetector && onnxRunTime config
 
 debugOCR("Iniciando content.js")
@@ -226,9 +279,28 @@ testComicTextDetectorFile().then(() => {
 loadComicTextDetector().then(async session => {
     debugOCR("CTD pronto: ", session.inputNames)
 
-    const preprocess = await testImagePreprocessing()
-    debugOCR("Pre-processamento concluido: ", preprocess)
+    const candidates = findPageImageCandidates()
 
+    console.log("Quantidade de candidatos: ", candidates.length)
+
+    if(candidates.length === 0)throw new Error("Nenhuma imagem candidata encontrada na pagina")
+
+    const pageImage = candidates[0]
+
+    debugOCR("Imagens candidatas: ",
+        candidates.map((image, index) => ({
+            index,
+            src: image.currentSrc || image.src,
+            naturalWidth: image.naturalWidth,
+            naturalHeight: image.naturalHeight,
+            displayedWidth: image.clientWidth,
+            displayedHeight: image.clientHeight
+        }))
+    )
+
+    // const preprocess = await testImagePreprocessing()
+    const preprocess = await preparePageImage(pageImage)
+    debugOCR("Pre-processamento concluido: ", preprocess)
     
     const detection = await runComicTextDetector(preprocess.tensor, preprocess.transform)
     debugOCR("Inferência concluida: ", detection.boxes)
@@ -256,25 +328,26 @@ loadComicTextDetector().then(async session => {
         }))
     )
 
-    showTranslationPreview(preprocess.image, translatedCrops)
+    renderTranslationOverImage(pageImage, translatedCrops)
+
+    //showTranslationPreview(preprocess.image, translatedCrops)
 
 
     //showDebugCrops(crops)
 
-    const debugCanvas = drawDebugBoxes(preprocess.image, detection.boxes)
+    // const debugCanvas = drawDebugBoxes(preprocess.image, detection.boxes)
 
-    debugCanvas.style.position = "fixed"
-    debugCanvas.style.top = "10px"
-    debugCanvas.style.right = "10px"
-    debugCanvas.style.maxWidth = "50vw"
-    debugCanvas.style.maxHeight = "90vh"
-    debugCanvas.style.width = "auto"
-    debugCanvas.style.height = "auto"
-    debugCanvas.style.zIndex = "200"
-    debugCanvas.style.border = "2px solid black"
+    // debugCanvas.style.position = "fixed"
+    // debugCanvas.style.top = "10px"
+    // debugCanvas.style.right = "10px"
+    // debugCanvas.style.maxWidth = "50vw"
+    // debugCanvas.style.maxHeight = "90vh"
+    // debugCanvas.style.width = "auto"
+    // debugCanvas.style.height = "auto"
+    // debugCanvas.style.zIndex = "200"
+    // debugCanvas.style.border = "2px solid black"
 
-    document.body.appendChild(debugCanvas)
-
+    // document.body.appendChild(debugCanvas)
 
 }).catch(error => {
     debugOCRError("Erro: ", error)

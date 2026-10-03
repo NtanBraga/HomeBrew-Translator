@@ -82,6 +82,22 @@ function buildTranslationPrompt({
         - Do not invent missing sentences.
         - Preserve names and proper nouns whenever possible.
 
+        OUTPUT FIELD RULES:
+
+        - "correctedText":
+        The OCR text after correcting obvious OCR mistakes.
+        It MUST remain in ${source}.
+        NEVER translate correctedText into ${target}.
+
+        - "translation":
+        The translation of correctedText into ${target}.
+        It MUST contain the translated text when the input contains text.
+        Do NOT leave translation empty.
+
+        - "corrections":
+        Only list actual OCR corrections.
+        "from" and "to" must refer to the source-language OCR text.
+
         OCR characters with unusually low confidence:
         ${suspiciousText}
 

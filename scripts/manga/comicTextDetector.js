@@ -140,7 +140,7 @@ function calculateLetterbox(originalWidth, originalHeight, targetSize = CTD_INPU
     }
 }
 
-function loadImage(url){
+export function loadImage(url){
     return new Promise((resolve, reject) => {
         const image = new Image()
 
@@ -154,7 +154,7 @@ function loadImage(url){
     })
 }
 
-function preprocessImage(image){
+export function preprocessImage(image){
     const {
         ratio, 
         resizedWidth, 
@@ -597,4 +597,71 @@ export function showTranslationPreview(image, translatedCrops){
     })
 
     return viewport
+}
+
+export function renderTranslationOverImage(imageElement, translatedCrops){
+    const rect = imageElement.getBoundingClientRect()
+    const scaleX = rect.width / imageElement.naturalWidth
+    const scaleY = rect.height / imageElement.naturalHeight
+
+    console.log("Imagem exibida: ", {
+        naturalWidth: imageElement.naturalWidth,
+        naturalHeight: imageElement.naturalHeight,
+        displayedWidth: rect.width,
+        displayedHeight: rect.height,
+        scaleX,
+        scaleY
+    })
+
+    const layer = document.createElement("div")
+    layer.className = "homebrew-translation-layer"
+
+    layer.style.position = "absolute"
+    layer.style.left = `${rect.left + window.scrollX}px`
+    layer.style.top = `${rect.top + window.scrollY}px`
+    layer.style.width = `${rect.width}px`
+    layer.style.height = `${rect.height}px`
+    layer.style.pointerEvents = "none"
+    layer.style.zIndex = "204"
+
+    document.body.appendChild(layer)
+
+    translatedCrops.forEach(item => {
+        if(!item.translation?.trim()) return
+
+        const box = item.box
+        const overlay = document.createElement("div")
+
+        overlay.className = "homebrew-translation-box"
+        overlay.textContent = item.translation
+        overlay.style.position = "absolute"
+        overlay.style.left = `${box.x1 * scaleX}px`
+        overlay.style.top = `${box.y1 * scaleY}px`
+        overlay.style.width = `${box.width * scaleX}px`
+        overlay.style.height = `${box.height * scaleY}px`
+        overlay.style.boxSizing = "border-box"
+        overlay.style.padding = "3px"
+        overlay.style.background = "rgba(255,255,255, 0.94)"
+        overlay.style.border = "1px solid red"
+        overlay.style.color = "black"
+        overlay.style.display = "flex"
+        overlay.style.alignItems = "center"
+        overlay.style.justifyContent = "center"
+        overlay.style.textAlign = "center"
+        overlay.style.whiteSpace = "normal"
+        overlay.style.overflowWrap = "break-word"
+        overlay.style.wordBreak = "normal"
+        overlay.style.overflow = "hidden"
+        overlay.style.fontFamily = "Arial, sans-serif"
+        overlay.style.lineHeight = "1.1"
+
+        layer.appendChild(overlay)
+
+        const fitting = fitTextToBox(overlay, 24, 6)
+
+        console.log(`Overlay ${item.index}: `, fitting)
+    })
+    document.body.appendChild(layer)
+
+    return layer
 }
