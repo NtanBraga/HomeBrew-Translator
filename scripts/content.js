@@ -91,6 +91,49 @@ const OCR_MODE = {
     DOCUMENT: "document"
 }
 
+// png -> base64
+async function recognizeMangaCrop(crop){
+    const imageBase64 = crop.canvas.toDataURL("image/png")
+
+    console.log(`Enviando crop ${crop.index} para Manga-OCR`)
+
+    const response = await chrome.runtime.sendMessage({
+        type: "MANGA_OCR",
+        image: imageBase64
+    })
+
+    if(!response.ok) throw new Error(response?.error || "Manga OCR falhou")
+
+    return response.text
+}
+
+async function recognizeAllMangaCrops(crops){
+    const result = []
+
+    for(const crop of crops){
+        debugOCR(`OCR ${crop.index + 1}/${crops.length}`)
+
+        try{
+            const text = await recognizeMangaCrop(crop)
+
+            debugOCR(`Crop ${crop.index}: `, text)
+
+            result.push({
+                ...crop,
+                text
+            })
+        }catch(e){
+            debugOCRError(`Erro OCR crop ${crop.index}: `, e)
+            result.push({
+                ...crop,
+                text: "",
+                ocrError: e?.message || String(e)
+            })
+        }
+    }
+    return result
+}
+
 // ComicTextDetector && onnxRunTime config
 
 debugOCR("Iniciando content.js")
@@ -117,6 +160,15 @@ loadComicTextDetector().then(async session => {
 
     const crops = cropTextBlocks(preprocess.image, detection.boxes)
     console.log("Crops criados: ", crops.length)
+
+    const recognizedCrops = await recognizeAllMangaCrops(crops)
+    debugOCR("OCR dos crops concluidos: ",
+        recognizedCrops.map(item => ({
+            index: item.index,
+            text: item.text,
+            confidence: item.box.confidence
+        }))
+    ) 
 
     showDebugCrops(crops)
 

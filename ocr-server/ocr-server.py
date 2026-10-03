@@ -1,5 +1,6 @@
 import base64
 import io
+import time
 
 from manga_ocr import MangaOcr
 from flask import Flask, request, jsonify
@@ -46,7 +47,13 @@ def ocr():
 
         image.load()
 
+        started_time = time.perf_counter()
+
         text = m_ocr(image)
+
+        elapsed = time.perf_counter() - started_time
+
+        print(f"OCR concluido em ${elapsed:.2f}s: ", text)
 
         return jsonify({
             "ok": True,

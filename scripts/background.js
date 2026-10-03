@@ -5,6 +5,8 @@ import { translateWithOllama,isOllamaAvailable,isTranslationModelInstalled, warm
 let activeTranslations = 0
 let unloadRequested = false
 
+const MANGA_OCR_URL = "http://127.0.0.1:8765"
+
 async function translationIsEnabled(){
     const data = await chrome.storage.local.get(['translationActive'])
     return Boolean(data.translationActive)
@@ -58,7 +60,50 @@ async function fetchImageForOCR(url){
     return (`data:${contentType};base64,${base64}`)
 }
 
+async function recognizeMangaImage(image){
+    const response = await fetch(
+        `${MANGA_OCR_URL}/ocr`,
+        {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({image})
+        }
+    )
+    const data = await response.json()
+
+    if(!response.ok){
+        throw new Error(data?.error || `Manga OCR HTTP ${response.status}`)
+    }
+
+    if(!data.ok){
+        throw new Error(data?.error || "Manga OCR falhou")
+    }
+    return data.text
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+
+    if(message?.type === "MANGA_OCR"){
+
+        ;(async () => {
+            try{
+                const text = await recognizeMangaImage(message.image)
+
+                sendResponse({
+                    ok: true,
+                    text
+                })
+
+            }catch(e){
+                console.error("Manga OCR error: ", e)
+                sendResponse({
+                    ok: false,
+                    error: e?.message || String(e)
+                })
+            }
+        })()
+        return true
+    }
 
     if(message?.type === "FETCH_IMAGE_FOR_OCR"){
         ;(async () => {
