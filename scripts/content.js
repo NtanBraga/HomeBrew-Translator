@@ -134,6 +134,81 @@ async function recognizeAllMangaCrops(crops){
     return result
 }
 
+//Detect - Translate
+
+async function transalteMangaText(text, sourceLanguage,targetLanguage){
+    const response = await chrome.runtime.sendMessage({
+        type:"OLLAMA_TRANSLATE",
+        payload: {
+            text,
+            sourceLanguage,
+            targetLanguage,
+            lowConfidenceWords: [],
+            context: ""
+        }
+    })
+
+    if(!response?.ok) throw new Error(response?.error || "Falha na tradução com Ollama")
+
+    return response.result
+}
+
+async function getTranslationSettings(){
+    const settings = await chrome.storage.local.get([
+        "langFrom", "langTo"
+    ])
+
+    return {
+        sourceLanguage: settings.langFrom || "jpn",
+        targetLanguage: settings.langTo || "eng"
+    }
+}
+
+async function translateAllMangaCrops(recognizedCrops) {
+    const {sourceLanguage, targetLanguage} = await getTranslationSettings()
+
+    const results = []
+
+    for(let i = 0; i < recognizedCrops.length; i++){
+        const item = recognizedCrops[i]
+
+        debugOCR(`Traduzindo ${i + 1}/${recognizedCrops.length}`, item.text)
+
+        if(!item.text?.trim()){
+            results.push({
+                ...item,
+                correctedText: "",
+                translation: "",
+                corrections: []
+            })
+            continue
+        }
+
+        try{
+            const translationResult = await transalteMangaText(item.text, sourceLanguage, targetLanguage)
+            debugOCR(`Tradução crop ${item.index}`, translationResult)
+
+            results.push({
+                ...item,
+                correctedText: translationResult.correctedText,
+                translation: translationResult.translation,
+                corrections: translationResult.corrections || []
+            })
+        }catch(e){
+            debugOCRError(`Erro traduzindo crop ${item.index}`, e)
+
+            results.push({
+                ...item,
+                correctedText: item.text,
+                translation: "",
+                corrections: [],
+                translationError: e?.message || String(e)
+            })
+        }
+    }
+    return results
+}
+
 // ComicTextDetector && onnxRunTime config
 
 debugOCR("Iniciando content.js")
@@ -169,6 +244,18 @@ loadComicTextDetector().then(async session => {
             confidence: item.box.confidence
         }))
     ) 
+
+    const translatedCrops = await translateAllMangaCrops(recognizedCrops)
+    debugOCR("Traduções concluidas: ",
+        translatedCrops.map(item => ({
+            index: item.index,
+            original: item.text,
+            corrected: item.correctedText,
+            translation: item.translation,
+            corrections: item.corrections
+        }))
+    )
+
 
     showDebugCrops(crops)
 

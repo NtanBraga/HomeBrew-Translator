@@ -1,12 +1,8 @@
 const LANGUAGE_NAMES = {
     jpn: "Japanese",
-    jpn_vert: "Japanese",
     kor: "Korean",
-    kor_vert: "Korean",
     chi_sim: "Simplified Chinese",
-    chi_sim_vert: "Simplified Chinese",
     chi_tra: "Tradicional Chinese",
-    chi_tra_vert: "Tradicional Chinese",
     eng: "English",
     por: "Portuguese",
     spa: "Spanish"
