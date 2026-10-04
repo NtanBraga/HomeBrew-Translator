@@ -36,6 +36,109 @@ function median(values){
     return values[Math.floor(values.length / 2)]
 }
 
+function measureBackgroundVarlance(sourceData, maskData, imageWidth, imageHeight, box){
+    const values = []
+
+    const x1 = Math.max(0, Math.floor(box.x1))
+    const y1 = Math.max(0, Math.floor(box.y1))
+    const x2 = Math.min(imageWidth, Math.ceil(box.x2))
+    const y2 = Math.min(imageHeight, Math.ceil(box.y2))
+
+    for(let y = y1; y < y2; y +=2){
+        for(let x = x1; x < x2; x += 2){
+            const index = (y * imageWidth + x) * 4
+
+            if(maskData.data[index + 3] > 0) continue
+
+            const r = sourceData.data[index]
+            const g = sourceData.data[index + 1]
+            const b = sourceData.data[index + 2]
+        
+            values.push((r + g + b) / 3)
+        }
+    }
+    if(values.length === 0) return 0
+
+    const mean = values.reduce((a, b) => a + b, 0) / values .length
+    const variance = values.reduce((sum, value) => {
+        const diff = value - mean
+        return sum + diff * diff
+    }, 0) / values.length
+
+    return Math.sqrt(variance)
+}
+
+export function measureBackgroundDeviation(sourceData, maskData, imageWidth, imageHeight, box, sampleStep = 2){
+    let sumR = 0
+    let sumG = 0
+    let sumB = 0
+
+    let count = 0
+
+
+    const x1 = Math.max(0, Math.floor(box.x1))
+    const y1 = Math.max(0, Math.floor(box.y1))
+    const x2 = Math.min(imageWidth, Math.ceil(box.x2))
+    const y2 = Math.min(imageHeight, Math.ceil(box.y2))
+
+    for(let y = y1; y < y2; y += sampleStep){
+        for(let x = x1; x < x2; x += sampleStep){
+            const index = (y * imageWidth + x) * 4
+
+            if(maskData.data[index + 3] > 0) continue
+
+            sumR += sourceData.data[index]
+            sumG += sourceData.data[index + 1]
+            sumB += sourceData.data[index + 2]
+
+            count++
+        }
+    }
+
+    if(count == 0) return 0
+
+    const meanR = sumR / count
+    const meanG = sumG / count
+    const meanB = sumB / count
+
+    let squaredDifferenceSum = 0
+
+
+    for(let y = y1; y < y2; y += sampleStep){
+        for(let x = x1; x < x2; x += sampleStep){
+            const index = (y * imageWidth + x) * 4
+
+            if(maskData.data[index + 3] > 0)continue
+
+            const r = sourceData.data[index]
+            const g = sourceData.data[index + 1]
+            const b = sourceData.data[index + 2]
+
+            const diffR = r - meanR
+            const diffG = g - meanG
+            const diffB = b - meanB
+
+            squaredDifferenceSum += (diffR * diffR + diffG * diffG + diffB * diffB) / 3
+        } 
+    }
+
+    const variance = squaredDifferenceSum / count
+
+
+    return Math.sqrt(variance)
+
+}
+
+export function classifyBackground(deviation){
+    if(deviation < 12){
+        return "uniform"
+    }else if(deviation < 25){
+        return "mixed"
+    }else{
+        return "complex"
+    }
+}
+
 export function estimateBackgroundColor(sourceData, maskData, imageWidth, imageHeight, box){
     const reds = []
     const greens = []
@@ -76,6 +179,73 @@ export function estimateBackgroundColor(sourceData, maskData, imageWidth, imageH
         r: median(reds),
         g: median(greens),
         b: median(blues)
+    }
+}
+
+export function analizeBlackgroundDominance(sourceData, maskData, imageWidth, imageHeight,box, sampleStep=2, tolerance=25){
+    const pixels = []
+    const reds = []
+    const greens = []
+    const blues = []
+
+    const x1 = Math.max(0, Math.floor(box.x1))
+    const y1 = Math.max(0, Math.floor(box.y1))
+    const x2 = Math.min(imageWidth, Math.ceil(box.x2))
+    const y2 = Math.min(imageHeight, Math.ceil(box.y2))
+
+    for(let y = y1; y < y2; y += sampleStep){
+        for(let x = x1; x < x2; x += sampleStep){
+            const index = (y * imageWidth + x) * 4
+
+            if(maskData.data[index + 3] > 0) continue
+
+            const r = sourceData.data[index]
+            const g = sourceData.data[index + 1]
+            const b = sourceData.data[index + 2]
+
+            reds.push(r)
+            greens.push(g)
+            blues.push(b)
+
+            pixels.push({
+                r,g,b
+            })
+        }
+    }
+    if(pixels.length === 0) {
+        return{
+            ratio: 0,
+            color: {
+                r: 255,
+                g: 255,
+                b: 255
+            }
+        }
+    }
+
+    const medianR = median(reds)
+    const medianG = median(greens)
+    const medianB = median(blues)
+
+    let similarCount = 0
+
+    for(const pixel of pixels){
+        const diffR = pixel.r - medianR
+        const diffG = pixel.g - medianG
+        const diffB = pixel.b - medianB
+    
+        const distance = Math.sqrt((diffR * diffR + diffG * diffG + diffB * diffB) / 3)
+
+        if(distance <= tolerance) similarCount++
+    }
+
+    return {
+        ratio: similarCount / pixels.length,
+        color:{
+            r:medianR,
+            g:medianG,
+            b:medianB
+        }
     }
 }
 

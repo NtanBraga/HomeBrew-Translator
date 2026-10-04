@@ -81,6 +81,21 @@ async function recognizeMangaImage(image){
     return data.text
 }
 
+async function inpaintMangaRegion(image, mask){
+    const response = await fetch(`${MANGA_OCR_URL}/inpaint`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({image,mask})
+    })
+    const data = await response.json()
+
+    if(!response.ok) throw new Error(data?.error || `Manga inpainting HTTP ${response.status}`)
+
+    if(!data.ok) throw new Error(data?.error || "Manga inpainting falhou")
+
+    return data.image
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if(message?.type === "MANGA_OCR"){
@@ -96,6 +111,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             }catch(e){
                 console.error("Manga OCR error: ", e)
+                sendResponse({
+                    ok: false,
+                    error: e?.message || String(e)
+                })
+            }
+        })()
+        return true
+    }
+
+    if(message?.type === "MANGA_INPAINT"){
+
+        ;(async () => {
+            try{
+                const image = await inpaintMangaRegion(message.image, message.mask)
+
+                sendResponse({
+                    ok: true,
+                    image
+                })
+
+            }catch(e){
+                console.error("Manga inpaint error: ", e)
                 sendResponse({
                     ok: false,
                     error: e?.message || String(e)

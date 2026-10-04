@@ -1,4 +1,4 @@
-import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview, loadImage, preprocessImage, renderTranslationOverImage, showSegmentationDebug, createSegmentationMask, estimateBackgroundColor } from "./manga/comicTextDetector"
+import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview, loadImage, preprocessImage, renderTranslationOverImage, showSegmentationDebug, createSegmentationMask, estimateBackgroundColor, measureBackgroundDeviation, classifyBackground, analizeBlackgroundDominance } from "./manga/comicTextDetector"
 
 const OCR_DEBUG = {events: []}
 
@@ -414,6 +414,137 @@ function dilateMaskCanvas(maskCanvas, radius = 2){
     return result
 }
 
+function createInpaintRegion(image, dilatedMask, box, padding=8){
+
+    const x1 = Math.max(0, Math.floor(box.x1 - padding))
+    const y1 = Math.max(0, Math.floor(box.y1 - padding))
+    const x2 = Math.min(image.naturalWidth, Math.ceil(box.x2 + padding))
+    const y2 = Math.min(image.naturalHeight, Math.ceil(box.y2 + padding))
+
+    const width = x2 - x1
+    const height = y2 - y1
+
+    const imageCanvas = document.createElement("canvas")
+    imageCanvas.width = width
+    imageCanvas.height = height
+
+    const imageContext = imageCanvas.getContext("2d")
+
+    if(!imageContext) throw new Error("Não foi possivel criar imageCanvas do inpaint")
+
+    imageContext.drawImage(
+        image,
+        x1,
+        y1,
+        width,
+        height,
+        0,
+        0,
+        width,
+        height
+    )
+
+    const maskCanvas = document.createElement("canvas")
+    maskCanvas.width = width
+    maskCanvas.height = height
+
+    const maskContext = maskCanvas.getContext("2d")
+
+    if(!maskContext) throw new Error("Não foi possivel criar maskCanvas do inpaint")
+
+    maskContext.fillStyle = "black"
+    maskContext.fillRect(0, 0, width, height)
+
+    maskContext.drawImage(
+        dilatedMask,
+        x1,
+        y1,
+        width,
+        height,
+        0,
+        0,
+        width,
+        height
+    )
+
+    return {
+        imageCanvas,
+        maskCanvas,
+        crop: {
+            x: x1,
+            y: y1,
+            width,
+            height
+        }
+    }
+}
+
+function drawLocalEraseForCrop(context, sourceData, maskData, imageWidth, imageHeight, item){
+    const box = item.box
+
+    const backgroundColor = estimateBackgroundColor(sourceData, maskData, imageWidth, imageHeight, box)
+
+    const x1 = Math.max(0, Math.floor(box. x1))
+    const y1 = Math.max(0, Math.floor(box. y1))
+    const x2 = Math.min(imageWidth, Math.ceil(box. x2))
+    const y2 = Math.min(imageHeight, Math.ceil(box. y2))
+
+    const imageData = context.getImageData(0, 0, imageWidth, imageHeight)
+
+    for(let y = y1; y < y2; y++){
+        for(let x = x1; x < x2; x++){
+            const index = (y * imageWidth + x) * 4
+
+            if(maskData.data[index + 3] === 0) continue
+
+            imageData.data[index] = backgroundColor.r
+            imageData.data[index + 1] = backgroundColor.g
+            imageData.data[index + 2] = backgroundColor.b
+            imageData.data[index + 3] = 255
+        }
+    }
+    context.putImageData(imageData, 0, 0)
+}
+
+function applyLocalEraseToImageData(restorationData, sourceData, maskData, imageWidth, imageHeight, item){
+    const box = item.box
+
+    const backgroundColor = estimateBackgroundColor(sourceData, maskData, imageWidth, imageHeight, box)
+
+    const x1 = Math.max(0, Math.floor(box. x1))
+    const y1 = Math.max(0, Math.floor(box. y1))
+    const x2 = Math.min(imageWidth, Math.ceil(box. x2))
+    const y2 = Math.min(imageHeight, Math.ceil(box. y2))
+
+    for(let y = y1; y < y2; y++){
+        for(let x = x1; x < x2; x++){
+            const index = (y * imageWidth + x) * 4
+
+            if(maskData.data[index + 3] === 0) continue
+
+            restorationData.data[index] = backgroundColor.r
+            restorationData.data[index + 1] = backgroundColor.g
+            restorationData.data[index + 2] = backgroundColor.b
+            restorationData.data[index + 3] = 255
+        }
+    }
+}
+
+async function requestMangaInpaint(imageCanvas, maskCanvas){
+    const imageBase64 = imageCanvas.toDataURL("image/png")
+    const maskBase64 = maskCanvas.toDataURL("image/png")
+
+    const response = await chrome.runtime.sendMessage({
+        type: "MANGA_INPAINT",
+        image: imageBase64,
+        mask: maskBase64
+    })
+
+    if(!response.ok) throw new Error(response?.error || "Manga inpainting falhou")
+
+    return response.image
+}
+
 export function createTextEraseCanvas(image, segmentationTensor, transform, translatedCrops, threshold = 0.5, dilationRadius = 2){
     const mask = createSegmentationMask(segmentationTensor, transform, threshold)
     
@@ -535,19 +666,111 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
         const translatedCrops = await translateAllMangaCrops(recognizedCrops)
 
-        const eraseCanvas = createTextEraseCanvas
-        (
-            preprocess.image,
-            detection.segmentation,
-            preprocess.transform,
-            translatedCrops,
-            0.5,
-            2
-        )
+        // const eraseCanvas = createTextEraseCanvas
+        // (
+        //     preprocess.image,
+        //     detection.segmentation,
+        //     preprocess.transform,
+        //     translatedCrops,
+        //     0.5,
+        //     2
+        // )
+
+        const baseMask = createSegmentationMask(detection.segmentation, preprocess.transform, 0.5)
+        const fillMask = dilateMaskCanvas(baseMask, 1)
+        const inpaintMask = dilateMaskCanvas(baseMask,  4)
+
+
+        const fillMaskContext = fillMask.getContext("2d", { willReadFrequently: true })
+        if(!fillMaskContext) throw new Error("Não foi possivel ler fillMask")
+        const fillMaskData = fillMaskContext.getImageData(0, 0, fillMask.width, fillMask.height)
+
+        const sourceCanvas = document.createElement("canvas")
+        sourceCanvas.width = preprocess.image.naturalWidth
+        sourceCanvas.height = preprocess.image.naturalHeight
+
+        const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true })
+
+        sourceContext.drawImage(preprocess.image, 0, 0, sourceCanvas.width, sourceCanvas.height)
+
+        const sourceData = sourceContext.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height)
+
+        const localItems = []
+        const inpaintItems = []
+
+        for(const item of translatedCrops){
+            if(!item.translation?.trim()) continue
+
+            if(generation !== translationGeneration) return
+
+            const deviation = measureBackgroundDeviation(sourceData, fillMaskData, sourceCanvas.width, sourceCanvas.height, item.box)
+
+            const dominance = analizeBlackgroundDominance(sourceData, fillMaskData, sourceCanvas.width, sourceCanvas.height, item.box)
+
+            let backgroundType
+
+            if(dominance.ratio >= 0.80){
+                backgroundType = "uniform"
+            }else if(dominance.ratio >= 0.60 || deviation < 25){
+                backgroundType = "mixed"
+            }else{
+                backgroundType = "complex"
+            }
+
+            debugOCR(`Crop ${item.index} - analise: `, {
+                deviation,
+                dominantRatio: dominance.ratio,
+                dominantColor: dominance.color,
+                backgroundType
+            })
+
+            if(backgroundType === "uniform"){
+                localItems.push(item)
+            }else if(backgroundType === "mixed" && dominance.color.r > 220 && dominance.color.g > 220 && dominance.color.b > 220){
+                localItems.push(item)
+            }else{
+                inpaintItems.push(item)
+            }
+
+        }
+
+        const restorationCanvas = document.createElement("canvas")
+
+        restorationCanvas.width = preprocess.image.naturalWidth
+        restorationCanvas.height = preprocess.image.naturalHeight
+
+        const restorationContext = restorationCanvas.getContext("2d")
+
+        if(!restorationContext) throw new Error("Não foi possivel criar canvas final do inpainting")
+
+        const restorationData = restorationContext.createImageData(restorationCanvas.width, restorationCanvas.height)
+
+
+        for(const item of localItems){
+            if(generation !== translationGeneration) return
+            debugOCR(`Crop ${item.index}: preenchimento local`)
+            applyLocalEraseToImageData(restorationData, sourceData, fillMaskData, restorationCanvas.width, restorationCanvas.height, item)
+        }
+
+        restorationContext.putImageData(restorationData, 0, 0)
+
+        for(const item of inpaintItems){
+            if(generation !== translationGeneration) return
+            debugOCR(`Crop ${item.index}: inpainting`)
+
+            const region = createInpaintRegion(preprocess.image, inpaintMask, item.box, 8)
+            const inpaintResult = await requestMangaInpaint(region.imageCanvas, region.maskCanvas)
+            
+            if(generation !== translationGeneration) return
+
+            const inpaintImage = await loadImage(inpaintResult)
+
+            restorationContext.drawImage(inpaintImage, region.crop.x, region.crop.y, region.crop.width, region.crop.height)
+        }
 
         if(generation !== translationGeneration) return
 
-        const overlayController = renderTranslationOverImage(imageElement, translatedCrops, eraseCanvas)
+        const overlayController = renderTranslationOverImage(imageElement, translatedCrops, restorationCanvas)
 
         mangaOverlayController.set(imageElement, overlayController)
 
