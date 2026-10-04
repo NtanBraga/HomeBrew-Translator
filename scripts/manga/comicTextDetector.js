@@ -68,11 +68,163 @@ function measureBackgroundVarlance(sourceData, maskData, imageWidth, imageHeight
     return Math.sqrt(variance)
 }
 
+function getReadableTextColor(backgroundColor){
+    if(!backgroundColor) return "black"
+
+    const {r, g, b} = backgroundColor
+
+    const luminance = 0.299 * r + 0.587 * g + 0.114 * b
+
+    if(luminance < 140) return "white"
+
+    return "black"
+}
+
+function expandTranslationBox(box, imageWidth, imageHeight, factorX = 1.6, factorY = 1.15){
+    const centerX = (box.x1 + box.x2) / 2
+    const centerY = (box.y1 + box.y2) / 2
+
+    const newWidth = box.width * factorX
+    const newHeight = box.height * factorY
+
+    let x1 = centerX - newWidth / 2
+    let y1 = centerY - newHeight / 2
+    let x2 = centerX + newWidth / 2
+    let y2 = centerY + newHeight / 2
+
+    x1 = Math.max(0, x1)
+    y1 = Math.max(0, y1)
+    x2 = Math.min(imageWidth, x2)
+    y2 = Math.min(imageHeight, y2)
+
+    return {
+        x1,
+        y1,
+        x2,
+        y2,
+        width: x2 - x1,
+        height: y2 - y1
+    }
+}
+
+function rgbDistance(r, g, b, color){
+    const dr = r - color.r
+    const dg = g - color.g
+    const db = b - color.b
+
+    return Math.sqrt((dr * dr + dg * dg + db * db) / 3)
+}
+
+export function growTranslationBox(sourceData, maskData, imageWidth, imageHeight, box, backgroundAnalysis, options = {}){
+    const {tolerance = 30, requiredRatio = 0.72, step = 2, sampleStep = 2, maxWidthFactor = 1.5, maxHeightFactor = 1.15} = options
+
+    if(!backgroundAnalysis || backgroundAnalysis.backgroundType !== "uniform") return {...box}
+
+    const backgroundColor = backgroundAnalysis.dominantColor
+    const originalWidth = box.width
+    const originalHeight = box.height
+    const maxWidth = originalWidth * maxWidthFactor
+    const maxHeight = originalHeight * maxHeightFactor
+    const maxExpandX = (maxWidth - originalWidth) / 2
+    const maxExpandY = (maxHeight - originalHeight) / 2 
+
+    const minAllowedX1 = Math.max(0, box.x1 - maxExpandX)
+    const minAllowedY1 = Math.max(0, box.y1 - maxExpandY)
+    const maxAllowedX2 = Math.min(imageWidth, box.x2 + maxExpandX)
+    const maxAllowedY2 = Math.min(imageHeight, box.y2 + maxExpandY)
+
+
+    const result = {
+        x1: box.x1,
+        y1: box.y1,
+        x2: box.x2,
+        y2: box.y2,
+        width: box.width,
+        height: box.height
+    }
+
+    function regionMatchesBackground(x1, y1, x2, y2){
+        x1 = Math.max(0, Math.floor(x1))
+        y1 = Math.max(0, Math.floor(y1))
+        x2 = Math.min(imageWidth, Math.ceil(x2))
+        y2 = Math.min(imageHeight, Math.ceil(y2))
+
+        let matches = 0
+        let considered = 0
+
+        for(let y = y1; y < y2; y += sampleStep){
+            for(let x = x1; x < x2; x += sampleStep){
+                const index = (y * imageWidth + x) * 4
+
+                if(maskData.data[index + 3] > 0) continue
+
+                considered++
+
+                const r = sourceData.data[index]
+                const g = sourceData.data[index + 1]
+                const b = sourceData.data[index + 2]
+
+                const distance = rgbDistance(r, g, b, backgroundColor)
+
+                if(distance <= tolerance) matches++
+            }
+        }
+        if(considered === 0) return false
+
+        return (matches / considered) >= requiredRatio
+    }
+
+    for(let pass = 0; pass < 100; pass++){
+        let changed = false
+
+        if(result.width < maxWidth){
+            const newX1 = Math.max(minAllowedX1, result.x1 - step)
+
+            if(newX1 < result.x1 && regionMatchesBackground(newX1, result.y1, result.x1, result.y2)){
+                result.x1 = newX1
+                changed = true
+            }
+        }
+        if(result.width < maxWidth){
+            const newX2 = Math.min(maxAllowedX2, result.x2 + step)
+
+            if(newX2 > result.x2 && regionMatchesBackground(result.x2, result.y1, newX2, result.y2)){
+                result.x2 = newX2
+                changed = true
+            }
+        }
+        result.width = result.x2 - result.x1
+        
+        if(result.height < maxHeight){
+            const newY1 = Math.max(minAllowedY1, result.y1 - step)
+
+            if(newY1 < result.y1 && regionMatchesBackground(result.x1, newY1, result.x2, result.y1)){
+                result.y1 = newY1
+                changed = true
+            }
+        }
+
+        if(result.height < maxHeight){
+            const newY2 = Math.min(maxAllowedY2, result.y2 + step)
+
+            if(newY2 > result.y2 && regionMatchesBackground(result.x1, result.y2, result.x2, newY2)){
+                result.y2 = newY2
+                changed = true
+            }
+        }
+
+        result.width = result.x2 - result.x1
+        result.height = result.y2 - result.y1
+
+        if(!changed) break
+    }
+    return result
+}
+
 export function measureBackgroundDeviation(sourceData, maskData, imageWidth, imageHeight, box, sampleStep = 2){
     let sumR = 0
     let sumG = 0
     let sumB = 0
-
     let count = 0
 
 
@@ -427,7 +579,7 @@ export function createSegmentationMask(segmentationTensor, transform, threshold 
     originalCanvas.width = transform.originalWidth
     originalCanvas.height = transform.originalHeight
 
-    const originalContext = originalCanvas.getContext("2d")
+    const originalContext = originalCanvas.getContext("2d", {willReadFrequently: true})
 
     if(!originalContext) throw new Error("Não foi possivel criar canvas original da mascara")
 
@@ -910,7 +1062,7 @@ export function showTranslationPreview(image, translatedCrops){
     translatedCrops.forEach(item => {
         if(!item.translation?.trim()) return
 
-        const box = item.box
+        const box = item.translationBox || item.box
         const overlay = document.createElement("div")
 
         overlay.textContent = item.translation
@@ -981,13 +1133,16 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
 
         const overlay = document.createElement("div")
 
+        const backgroundColor = item.backgroundAnalysis?.dominantColor
+        const textColor = getReadableTextColor(backgroundColor)
+
         overlay.textContent = item.translation
         overlay.style.position = "absolute"
         overlay.style.boxSizing = "border-box"
         overlay.style.padding = "3px"
         overlay.style.background = "transparent"
         overlay.style.border = "1px solid red"
-        overlay.style.color = "black"
+        overlay.style.color = textColor
         overlay.style.display = "flex"
         overlay.style.alignItems = "center"
         overlay.style.justifyContent = "center"
@@ -998,8 +1153,9 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
         overlay.style.overflow = "hidden"
         overlay.style.fontFamily = "Arial, sans-serif"
         overlay.style.lineHeight = "1.1"
+        overlay.style.pointerEvents = "none"
 
-        //layer.appendChild(overlay)
+        layer.appendChild(overlay)
 
         overlays.push({element: overlay, item})
     })
@@ -1023,7 +1179,7 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
         const scaleY = rect.height / imageElement.naturalHeight
 
         overlays.forEach(({element, item}) => {
-            const box = item.box
+            const box = item.translationBox || item.box
 
             element.style.left = `${box.x1 * scaleX}px`
             element.style.top = `${box.y1 * scaleY}px`

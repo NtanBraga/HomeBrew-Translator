@@ -1,4 +1,4 @@
-import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview, loadImage, preprocessImage, renderTranslationOverImage, showSegmentationDebug, createSegmentationMask, estimateBackgroundColor, measureBackgroundDeviation, classifyBackground, analizeBlackgroundDominance } from "./manga/comicTextDetector"
+import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview, loadImage, preprocessImage, renderTranslationOverImage, showSegmentationDebug, createSegmentationMask, estimateBackgroundColor, measureBackgroundDeviation, classifyBackground, analizeBlackgroundDominance, growTranslationBox } from "./manga/comicTextDetector"
 
 const OCR_DEBUG = {events: []}
 
@@ -374,7 +374,7 @@ function dilateMaskCanvas(maskCanvas, radius = 2){
     const width = maskCanvas.width
     const height = maskCanvas.height
 
-    const sourceContext = maskCanvas.getContext("2d")
+    const sourceContext = maskCanvas.getContext("2d", { willReadFrequently: true })
     const sourceData = sourceContext.getImageData(0, 0, width, height)
 
     const result = document.createElement("canvas")
@@ -717,12 +717,22 @@ async function processMangaImage(imageElement, imageIndex, generation) {
                 backgroundType = "complex"
             }
 
-            debugOCR(`Crop ${item.index} - analise: `, {
+            item.backgroundAnalysis = {
                 deviation,
                 dominantRatio: dominance.ratio,
                 dominantColor: dominance.color,
                 backgroundType
+            }
+
+            debugOCR(`Crop ${item.index} - analise: `, item.backgroundAnalysis)
+
+            item.translationBox = growTranslationBox(sourceData, fillMaskData, sourceCanvas.width, sourceCanvas.height, item.box, item.backgroundAnalysis)
+
+            debugOCR(`Crop ${item.index} - translationBox: `, {
+                original: item.box,
+                expanded: item.translationBox
             })
+
 
             if(backgroundType === "uniform"){
                 localItems.push(item)
