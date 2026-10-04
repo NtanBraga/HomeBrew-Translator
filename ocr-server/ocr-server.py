@@ -53,7 +53,7 @@ def ocr():
 
         elapsed = time.perf_counter() - started_time
 
-        print(f"OCR concluido em ${elapsed:.2f}s: ", text)
+        print(f"OCR concluido em {elapsed:.2f}s: ", text)
 
         return jsonify({
             "ok": True,

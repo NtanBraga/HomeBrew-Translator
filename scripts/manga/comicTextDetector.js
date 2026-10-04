@@ -24,6 +24,61 @@ function calculateIoU(a, b){
     return intersectionArea / union
 }
 
+function sigmoid(value){
+    return 1 / (1 + Math.exp(-value))
+}
+
+function median(values){
+    if(values.length === 0) return 255
+
+    values.sort((a,b) => a - b)
+
+    return values[Math.floor(values.length / 2)]
+}
+
+export function estimateBackgroundColor(sourceData, maskData, imageWidth, imageHeight, box){
+    const reds = []
+    const greens = []
+    const blues = []
+
+    const x1 = Math.max(0, Math.floor(box.x1))
+    const y1 = Math.max(0, Math.floor(box.y1))
+    const x2 = Math.min(imageWidth, Math.ceil(box.x2))
+    const y2 = Math.min(imageHeight, Math.ceil(box.y2))
+
+    const sampleStep = 2
+
+    for(let y = y1; y < y2; y += sampleStep){
+        for(let x = x1; x < x2; x += sampleStep){
+            const index = (y * imageWidth + x) * 4
+            const maskAlpha = maskData.data[index + 3]
+
+            if(maskAlpha > 0) continue
+
+            const red = sourceData.data[index]
+            const green = sourceData.data[index + 1]
+            const blue = sourceData.data[index + 2]
+
+            reds.push(red)
+            greens.push(green)
+            blues.push(blue)
+        }
+    }
+
+    if(reds.length === 0){
+        return {
+            r: 255,
+            g: 255,
+            b: 255
+        }
+    }
+    return {
+        r: median(reds),
+        g: median(greens),
+        b: median(blues)
+    }
+}
+
 function decodeBlockOutput(blockTensor, transform){
     const data = blockTensor.data
     const dims = blockTensor.dims
@@ -138,6 +193,128 @@ function calculateLetterbox(originalWidth, originalHeight, targetSize = CTD_INPU
         paddingRight,
         paddingBottom  
     }
+}
+
+export function createSegmentationMask(segmentationTensor, transform, threshold = 0.5){
+    const dims = segmentationTensor.dims
+    const data = segmentationTensor.data
+
+    if(dims.length !== 4 || dims[0] !== 1 || dims[1] !== 1){
+        throw new Error(`Formato de segmentation inesperado: ${dims}`)
+    }
+
+    const height = dims[2]
+    const width = dims[3]
+
+    let minValue = Infinity
+    let maxValue = -Infinity
+
+    for(let i = 0; i < data.length; i++){
+        const value = data[i]
+
+        if(value < minValue) minValue = value
+        if(value > maxValue) maxValue = value
+        
+    }
+
+    console.log(`Segmentation range: `, {minValue, maxValue})
+
+    const useSigmoid = minValue < 0 || maxValue > 1
+    const modelCanvas = document.createElement("canvas")
+
+    modelCanvas.width = width
+    modelCanvas.height = height
+
+    const context = modelCanvas.getContext("2d")
+
+    if(!context) throw new Error("Não foi possivel criar canvas da mascara")
+
+    const imageData = context.createImageData(width, height)
+
+    for(let i = 0; i < data.length; i++){
+        let probability = data[i]
+
+        if(useSigmoid){
+            probability = sigmoid(probability)
+        }
+
+        const pixelIndex = i * 4
+
+        if(probability >= threshold){
+
+            imageData.data[pixelIndex] = 255
+            imageData.data[pixelIndex + 1] = 0
+            imageData.data[pixelIndex + 2] = 0
+            imageData.data[pixelIndex + 3] = 180
+        }else{
+            imageData.data[pixelIndex + 3] = 0
+        }
+    }
+    context.putImageData(imageData, 0, 0)
+
+    const originalCanvas = document.createElement("canvas")
+
+    originalCanvas.width = transform.originalWidth
+    originalCanvas.height = transform.originalHeight
+
+    const originalContext = originalCanvas.getContext("2d")
+
+    if(!originalContext) throw new Error("Não foi possivel criar canvas original da mascara")
+
+    originalContext.imageSmoothingEnabled = false
+    originalContext.drawImage(
+        modelCanvas,
+        //source
+        0,
+        0,
+        transform.resizedWidth,
+        transform.resizedHeight,
+        //destination
+        0,
+        0,
+        transform.originalWidth,
+        transform.originalHeight
+    )
+    return originalCanvas
+}
+
+export function showSegmentationDebug(image, segmentationTensor, transform){
+    const mask = createSegmentationMask(segmentationTensor, transform, 0.5)
+    const canvas = document.createElement("canvas")
+
+    canvas.width = image.naturalWidth
+    canvas.height = image.naturalHeight
+
+    const context = canvas.getContext("2d")
+
+    if(!context) throw new Error("Não foi possivel criar debug da segmentation")
+
+    context.drawImage(
+        image,
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    )
+    context.drawImage(
+        mask,
+        0,
+        0
+    )
+
+    canvas.style.position = "fixed"
+    canvas.style.right = "10px"
+    canvas.style.top = "10px"
+    canvas.style.maxWidth = "50vw"
+    canvas.style.maxHeight = "90vh"
+    canvas.style.width = "auto"
+    canvas.style.height = "auto"
+    canvas.style.zIndex = "205"
+    canvas.style.border = "2px solid black"
+
+    document.body.appendChild(canvas)
+
+    return canvas
 }
 
 export function loadImage(url){
@@ -599,7 +776,7 @@ export function showTranslationPreview(image, translatedCrops){
     return viewport
 }
 
-export function renderTranslationOverImage(imageElement, translatedCrops){
+export function renderTranslationOverImage(imageElement, translatedCrops, eraseCanvas){
 
     const oldLayer = imageElement.__homebrewTranslationLayer
 
@@ -614,6 +791,19 @@ export function renderTranslationOverImage(imageElement, translatedCrops){
 
     document.body.appendChild(layer)
 
+    if(eraseCanvas){
+        eraseCanvas.className = "homebrew-text-erase-layer"
+        eraseCanvas.style.position = "absolute"
+        eraseCanvas.style.left = "0"
+        eraseCanvas.style.top = "0"
+        eraseCanvas.style.width = "100%"
+        eraseCanvas.style.height = "100%"
+        eraseCanvas.style.pointerEvents = "none"
+        eraseCanvas.style.zIndex = "0"
+
+        layer.appendChild(eraseCanvas)
+    }
+
     const overlays = []
 
     translatedCrops.forEach(item => {
@@ -625,7 +815,7 @@ export function renderTranslationOverImage(imageElement, translatedCrops){
         overlay.style.position = "absolute"
         overlay.style.boxSizing = "border-box"
         overlay.style.padding = "3px"
-        overlay.style.background = "rgba(255,255,255, 0.94)"
+        overlay.style.background = "transparent"
         overlay.style.border = "1px solid red"
         overlay.style.color = "black"
         overlay.style.display = "flex"
@@ -639,7 +829,7 @@ export function renderTranslationOverImage(imageElement, translatedCrops){
         overlay.style.fontFamily = "Arial, sans-serif"
         overlay.style.lineHeight = "1.1"
 
-        layer.appendChild(overlay)
+        //layer.appendChild(overlay)
 
         overlays.push({element: overlay, item})
     })

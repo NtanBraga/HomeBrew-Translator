@@ -1,4 +1,4 @@
-import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview, loadImage, preprocessImage, renderTranslationOverImage } from "./manga/comicTextDetector"
+import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview, loadImage, preprocessImage, renderTranslationOverImage, showSegmentationDebug, createSegmentationMask, estimateBackgroundColor } from "./manga/comicTextDetector"
 
 const OCR_DEBUG = {events: []}
 
@@ -292,7 +292,7 @@ function enqueueMangaImage(imageElement){
 
         if(!settings.active || settings.mode !== OCR_MODE.MANGA) return
 
-        if(imageElement.homebrewOcrStatus === "translated") return
+        if(imageElement.dataset.homebrewOcrStatus === "translated") return
 
         await processMangaImage(imageElement, imageIndex, generation)
     }).catch(error => {
@@ -370,6 +370,114 @@ function findPageImageCandidates(){
     return candidates
 }
 
+function dilateMaskCanvas(maskCanvas, radius = 2){
+    const width = maskCanvas.width
+    const height = maskCanvas.height
+
+    const sourceContext = maskCanvas.getContext("2d")
+    const sourceData = sourceContext.getImageData(0, 0, width, height)
+
+    const result = document.createElement("canvas")
+    result.width = width
+    result.height = height
+
+    const resultContext = result.getContext("2d")
+    const resultData = resultContext.createImageData(width, height)
+
+    for(let y = 0; y < height; y++){
+        for(let x = 0; x < width; x++){
+            const index = (y * width + x) * 4
+
+            if(sourceData.data[index + 3] === 0) continue
+
+            for(let dy = -radius; dy <= radius; dy++){
+                for(let dx = -radius; dx <= radius; dx++){
+                    if(dx * dx + dy * dy > radius * radius) continue
+
+                    const nx = x + dx
+                    const ny = y + dy
+
+                    if(nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+
+                    const newIndex = (ny * width + nx) * 4
+
+                    resultData.data[newIndex] = 255
+                    resultData.data[newIndex + 1] = 255
+                    resultData.data[newIndex + 2] = 255
+                    resultData.data[newIndex + 3] = 255
+                }
+            }
+        }
+    }
+    resultContext.putImageData(resultData, 0, 0)
+
+    return result
+}
+
+export function createTextEraseCanvas(image, segmentationTensor, transform, translatedCrops, threshold = 0.5, dilationRadius = 2){
+    const mask = createSegmentationMask(segmentationTensor, transform, threshold)
+    
+    const dilatedMask = dilateMaskCanvas(mask, dilationRadius)
+
+    const sourceCanvas = document.createElement("canvas")
+    sourceCanvas.width = transform.originalWidth
+    sourceCanvas.height = transform.originalHeight
+
+    const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true})
+    const maskContext = dilatedMask.getContext("2d", { willReadFrequently: true})
+
+    if(!maskContext) throw new Error("Não foi possivel ler manga")
+    if(!sourceContext) throw new Error("Não foi possivel criar source canvas")
+
+    sourceContext.drawImage(image, 0, 0, sourceCanvas.width, sourceCanvas.height)
+
+    const sourceData = sourceContext.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height)
+    const maskData = maskContext.getImageData(0, 0, dilatedMask.width, dilatedMask.height)
+
+    const eraseCanvas = document.createElement("canvas")
+
+    eraseCanvas.width = transform.originalWidth
+    eraseCanvas.height = transform.originalHeight
+    
+    const eraseContext = eraseCanvas.getContext("2d")
+
+    if(!eraseContext) throw new Error("Não foi possivel criar erase canvas")
+
+    const eraseData = eraseContext.createImageData(eraseCanvas.width, eraseCanvas.height)
+
+    translatedCrops.forEach(item => {
+        if(!item.translation?.trim()) return
+
+        const box = item.box
+
+        const backgroundColor = estimateBackgroundColor(sourceData, maskData, eraseCanvas.width, eraseCanvas.height, box)
+
+        debugOCR(`Background crop ${item.index}: `, backgroundColor)
+
+        const x1 = Math.max(0, Math.floor(box.x1))
+        const y1 = Math.max(0, Math.floor(box.y1))
+        const x2 = Math.min(eraseCanvas.width, Math.ceil(box.x2))
+        const y2 = Math.min(eraseCanvas.height, Math.ceil(box.y2))
+
+        for(let y = y1; y < y2; y++){
+            for(let x = x1; x < x2; x++){
+                const index = (y * eraseCanvas.width + x) * 4
+
+                if(maskData.data[index + 3] === 0) continue
+
+                eraseData.data[index] = backgroundColor.r
+                eraseData.data[index + 1] = backgroundColor.g
+                eraseData.data[index + 2] = backgroundColor.b
+                eraseData.data[index + 3] = 255
+            }
+        }
+    })
+
+    eraseContext.putImageData(eraseData, 0, 0)
+
+    return eraseCanvas
+}
+
 async function fetchPageImageasDataUrl(imageElement){
     const url = imageElement.currentSrc || imageElement.src
     const response = await chrome.runtime.sendMessage({
@@ -408,6 +516,8 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
         const detection = await runComicTextDetector(preprocess.tensor, preprocess.transform)
 
+        //showSegmentationDebug(preprocess.image, detection.segmentation, preprocess.transform)
+
         if(generation !== translationGeneration) return
 
         console.log(`Imagem ${imageIndex}: `, detection.boxes.length, " blocos encontrados")
@@ -425,9 +535,19 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
         const translatedCrops = await translateAllMangaCrops(recognizedCrops)
 
+        const eraseCanvas = createTextEraseCanvas
+        (
+            preprocess.image,
+            detection.segmentation,
+            preprocess.transform,
+            translatedCrops,
+            0.5,
+            2
+        )
+
         if(generation !== translationGeneration) return
 
-        const overlayController = renderTranslationOverImage(imageElement, translatedCrops)
+        const overlayController = renderTranslationOverImage(imageElement, translatedCrops, eraseCanvas)
 
         mangaOverlayController.set(imageElement, overlayController)
 
@@ -438,7 +558,7 @@ async function processMangaImage(imageElement, imageIndex, generation) {
     }catch(e){
         imageElement.dataset.homebrewOcrStatus = "error"
 
-        debugOCRError(`Erro processando imagem ${imageIndex}`, error)
+        debugOCRError(`Erro processando imagem ${imageIndex}`, e)
     }
 }
 
@@ -469,8 +589,6 @@ async function startMangaTranslation(){
 
     const generation = ++ translationGeneration
 
-    startMangaMutationObserver()
-
     try{
         debugOCR("Iniciando modo manga")
 
@@ -479,6 +597,8 @@ async function startMangaTranslation(){
         if(generation !== translationGeneration) return
 
         debugOCR("CTD pronto:", session.inputNames)
+
+        startMangaMutationObserver()
 
         const candidates = findPageImageCandidates()
 
@@ -547,7 +667,7 @@ async function initialize(){
 }
 
 initialize().catch(error => {
-    debugOCRError("Erro inicializando Homebrew Translator: ", e)
+    debugOCRError("Erro inicializando Homebrew Translator: ", error)
 })
 
 
