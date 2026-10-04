@@ -2,6 +2,17 @@ import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, test
 
 const OCR_DEBUG = {events: []}
 
+let translationRunning = false
+let translationGeneration = 0
+
+const mangaOverlayController = new Map()
+
+let mangaMutationObserver = null
+let mangaProcessQueue = Promise.resolve()
+let mangaImageSequence = 0
+
+const waitingImages = new WeakSet()
+
 
 function debugOCR(label, value){
     
@@ -89,6 +100,35 @@ const OCR_MODE = {
     AUTO: "auto",
     MANGA: "manga",
     DOCUMENT: "document"
+}
+
+//Deactivate translations
+
+async function getMangaTranslationState(){
+    const settings = await chrome.storage.local.get([
+        "translationActive", "ocrMode"
+    ])
+    return {
+        active: settings.translationActive === true,
+        mode: settings.ocrMode || OCR_MODE.AUTO
+    }
+}
+
+function clearMangaTranslations(){
+    debugOCR("Removendo overlays do Homebrew Translator")
+
+    for(const controller of mangaOverlayController.values()){
+        try{
+            controller.destroy()
+        }catch(e){
+            debugOCRError("Erro removendo overlay: ", e)
+        }
+    }
+    mangaOverlayController.clear()
+
+    document.querySelectorAll("[data-homebrew-ocr-status]").forEach(
+        image => { delete image.dataset.homebrewOcrStatus }
+    )
 }
 
 // png -> base64
@@ -211,21 +251,115 @@ async function translateAllMangaCrops(recognizedCrops) {
 
 // find image candidate
 
-function findPageImageCandidates(){
-    const images = Array.from(document.images)
-    const candidates = images.filter(image => {
-        const src = image.currentSrc || image.src
+function isMangaImageCandidate(image){
+    if(!(image instanceof HTMLImageElement)) return false
 
-        if(!src) return false
-        if(!src.startsWith("http://") && !src.startsWith("https://")) return false
-        if(!image.complete) return false
-        if(image.naturalWidth < 300 || image.naturalHeight < 300) return false
+    const src = image.currentSrc || image.src
 
-        const rect = image.getBoundingClientRect()
-        if(rect.width <= 0 || rect.height <= 0) return false
+    if(!src) return false
 
-        return true
+    if(!src.startsWith("http://") && !src.startsWith("https://")) return false
+
+    if(!image.complete) return false
+
+    if(image.naturalWidth < 300 || image.naturalHeight < 300) return false
+
+    const rect = image.getBoundingClientRect()
+    if(rect.width <= 0 || rect.height <= 0) return false
+
+    const status = image.dataset.homebrewOcrStatus
+
+    if(status === "queued" || status === "processing" || status === "translated") return false
+
+    return true
+
+}
+
+function enqueueMangaImage(imageElement){
+    if(!isMangaImageCandidate(imageElement)) return
+
+    const generation = translationGeneration
+    const imageIndex = mangaImageSequence++
+    
+    imageElement.dataset.homebrewOcrStatus = "queued"
+
+    debugOCR(`Imagem ${imageIndex} adicinada a fila`)
+
+    mangaProcessQueue = mangaProcessQueue.then(async () => {
+        if(generation !== translationGeneration) return
+
+        const settings = await getMangaTranslationState()
+
+        if(!settings.active || settings.mode !== OCR_MODE.MANGA) return
+
+        if(imageElement.homebrewOcrStatus === "translated") return
+
+        await processMangaImage(imageElement, imageIndex, generation)
+    }).catch(error => {
+        debugOCRError(`Erro na fila da imagem ${imageIndex}:`, error)
     })
+}
+
+function handlePotentialMangaImage(imageElement){
+    if(!(imageElement instanceof HTMLImageElement)) return
+
+    if(imageElement.complete && imageElement.naturalWidth > 0){
+        enqueueMangaImage(imageElement)
+        return
+    }
+
+    if(waitingImages.has(imageElement)) return
+
+    waitingImages.add(imageElement)
+
+    imageElement.addEventListener("load", () => {
+        waitingImages.delete(imageElement)
+        enqueueMangaImage(imageElement)
+    }, { once: true })
+}
+
+function startMangaMutationObserver(){
+    if(mangaMutationObserver) return
+
+    debugOCR("Inicializando Iniciando observação de novas imagens")
+
+    mangaMutationObserver = new MutationObserver(mutations => {
+        for(const mutation of mutations){
+            if(mutation.type === "childList"){
+                for(const node of mutation.addedNodes){
+                    if(!(node instanceof Element)) continue
+                    if(node instanceof HTMLImageElement) handlePotentialMangaImage(node)
+
+                    const images = node.querySelectorAll?.("img")
+
+                    images?.forEach(handlePotentialMangaImage)
+                }
+            }
+            if(mutation.type === "attributes" && mutation.target instanceof HTMLImageElement){
+                handlePotentialMangaImage(mutation.target)
+            }
+        }
+    })
+    mangaMutationObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["src", "srcset"]
+    })
+}
+
+function stopMangaMutationObserver(){
+    if(!mangaMutationObserver) return
+
+    debugOCR("Parando observação de imagens")
+
+    mangaMutationObserver.disconnect()
+
+    mangaMutationObserver = null
+}
+
+function findPageImageCandidates(){
+    const candidates = Array.from(document.images).filter(isMangaImageCandidate)
 
     candidates.sort((a,b) => {
         const areaA = a.naturalWidth * a.naturalHeight
@@ -262,14 +396,19 @@ async function preparePageImage(imageElement){
     }
 }
 
-async function processMangaImage(imageElement, imageIndex) {
+async function processMangaImage(imageElement, imageIndex, generation) {
     debugOCR(`Processando imagem ${imageIndex}`)
 
     try{
         imageElement.dataset.homebrewOcrStatus = "processing"
 
         const preprocess = await preparePageImage(imageElement)
+
+        if(generation !== translationGeneration) return
+
         const detection = await runComicTextDetector(preprocess.tensor, preprocess.transform)
+
+        if(generation !== translationGeneration) return
 
         console.log(`Imagem ${imageIndex}: `, detection.boxes.length, " blocos encontrados")
 
@@ -281,10 +420,17 @@ async function processMangaImage(imageElement, imageIndex) {
 
         const crops = cropTextBlocks(preprocess.image, detection.boxes)
         const recognizedCrops = await recognizeAllMangaCrops(crops)
+
+        if(generation !== translationGeneration) return
+
         const translatedCrops = await translateAllMangaCrops(recognizedCrops)
+
+        if(generation !== translationGeneration) return
+
         const overlayController = renderTranslationOverImage(imageElement, translatedCrops)
 
-        imageElement.__homebrewOverlayController = overlayController
+        mangaOverlayController.set(imageElement, overlayController)
+
         imageElement.dataset.homebrewOcrStatus = "translated"
         
         console.log(`Imagem ${imageIndex} concluida`)
@@ -304,61 +450,104 @@ testOnnxRuntime()
 
 debugOCR("Passou de testOnnxRuntime")
 
-testComicTextDetectorFile().then(() => {
-    debugOCR("Comic Text Detector encontrado com sucesso")
-}).catch(error => {
-    debugOCRError("Erro carregando Comic Text Detector: ", error)
-})
+//init
 
-loadComicTextDetector().then(async session => {
-    debugOCR("CTD pronto: ", session.inputNames)
-
-    const candidates = findPageImageCandidates()
-
-    console.log("Quantidade de candidatos: ", candidates.length)
-
-    if(candidates.length === 0)throw new Error("Nenhuma imagem candidata encontrada na pagina")
-
-    debugOCR("Imagens candidatas: ",
-        candidates.map((image, index) => ({
-            index,
-            src: image.currentSrc || image.src,
-            naturalWidth: image.naturalWidth,
-            naturalHeight: image.naturalHeight,
-            displayedWidth: image.clientWidth,
-            displayedHeight: image.clientHeight
-        }))
-    )
-
-    for(let i = 0; i < candidates.length; i++){
-        await processMangaImage(candidates[i], i)
+async function startMangaTranslation(){
+    if(translationRunning){
+        debugOCR("Tradução já está em execução")
+        return
     }
 
-    debugOCR("Todas as imagens foram processadas.")
+    const settings = await getMangaTranslationState()
+    
+    if(!settings.active || settings.mode !== OCR_MODE.MANGA){
+        debugOCR("Modo Manga não esta ativo")
+        return
+    }
 
-    //showTranslationPreview(preprocess.image, translatedCrops)
+    translationRunning = true
+
+    const generation = ++ translationGeneration
+
+    startMangaMutationObserver()
+
+    try{
+        debugOCR("Iniciando modo manga")
+
+        const session = await loadComicTextDetector()
+
+        if(generation !== translationGeneration) return
+
+        debugOCR("CTD pronto:", session.inputNames)
+
+        const candidates = findPageImageCandidates()
+
+        debugOCR("Imagens candidatas: ", candidates.length)
+
+        for(const image of candidates){
+            enqueueMangaImage(image)
+        }
+
+        console.log("Processamento Manga concluido.")
+    }catch(e){
+        debugOCRError("Erro no modo Manga: ", e)
+    }finally{
+        translationRunning = false
+    }
+}
+
+function stopMangaTranslation(){
+    debugOCR("Parando modo Manga")
+
+    translationGeneration++
+
+    translationRunning = false
+
+    stopMangaMutationObserver()
+
+    mangaProcessQueue = Promise.resolve()
+
+    clearMangaTranslations()
+}
+
+chrome.storage.onChanged.addListener(
+    async (changes, areaName) => {
+
+        if(areaName !== "local") return
 
 
-    //showDebugCrops(crops)
+        const translationChanged = "translationActive" in changes
 
-    // const debugCanvas = drawDebugBoxes(preprocess.image, detection.boxes)
+        const modeChanged = "ocrMode" in changes
 
-    // debugCanvas.style.position = "fixed"
-    // debugCanvas.style.top = "10px"
-    // debugCanvas.style.right = "10px"
-    // debugCanvas.style.maxWidth = "50vw"
-    // debugCanvas.style.maxHeight = "90vh"
-    // debugCanvas.style.width = "auto"
-    // debugCanvas.style.height = "auto"
-    // debugCanvas.style.zIndex = "200"
-    // debugCanvas.style.border = "2px solid black"
 
-    // document.body.appendChild(debugCanvas)
+        if(!translationChanged && !modeChanged) return
 
-}).catch(error => {
-    debugOCRError("Erro: ", error)
+        const settings = await getMangaTranslationState()
+
+        debugOCR("Configuração mudou: ", settings)
+
+        if(settings.active && settings.mode === OCR_MODE.MANGA){
+            await startMangaTranslation()
+        }else{
+            stopMangaTranslation()
+        }
+
+    }
+)
+
+async function initialize(){
+    debugOCR("Iniciando content.js")
+
+    const settings = await getMangaTranslationState()
+
+    debugOCR("Estado inicial: ", settings)
+
+    if(settings.active && settings.mode === OCR_MODE.MANGA) await startMangaTranslation()
+}
+
+initialize().catch(error => {
+    debugOCRError("Erro inicializando Homebrew Translator: ", e)
 })
-
-
 
 

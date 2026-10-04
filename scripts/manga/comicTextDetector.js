@@ -697,5 +697,16 @@ export function renderTranslationOverImage(imageElement, translatedCrops){
 
     imageElement.__homebrewTranslationLayer = layer
 
-    return {layer, resizeObserver, syncOverlay}
+    function destroy(){
+        resizeObserver.disconnect()
+
+        window.removeEventListener("resize", scheduleSync)
+        window.removeEventListener("scroll", scheduleSync)
+
+        layer.remove()
+
+        if(imageElement.__homebrewTranslationLayer === layer) delete imageElement.__homebrewTranslationLayer
+    }
+
+    return {layer, resizeObserver, syncOverlay, destroy}
 }
