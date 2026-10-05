@@ -108,6 +108,254 @@ function scanForContainerBoundary(sourceData, maskData, imageWidth, imageHeight,
     return null
 }
 
+function findFloodSeed(sourceData, maskData, imageWidth, imageHeight, box, backgroundColor, tolerance = 30){
+    const centerX = (box.x1 + box.x2) / 2
+    const centerY = (box.y1 + box.y2) / 2
+
+    const padding = Math.max(8, Math.round(Math.min(box.width, box.height) * 0.15))
+
+    const x1 = Math.max(0, Math.floor(box.x1 - padding))
+    const y1 = Math.max(0, Math.floor(box.y1 - padding))
+    const x2 = Math.min(imageWidth, Math.ceil(box.x2 + padding))
+    const y2 = Math.min(imageHeight, Math.ceil(box.y2 + padding))
+
+    let best = null
+    let bestDistance = Infinity
+
+    for(let y = y1; y < y2; y += 2){
+        for(let x = x1; x < x2; x += 2){
+            const index = (y * imageWidth + x) * 4
+
+            if(maskData.data[index + 3] > 0) continue
+
+            const r = sourceData.data[index]
+            const g = sourceData.data[index + 1]
+            const b = sourceData.data[index + 2]
+        
+            const colorDistance = rgbDistance(r, g, b, backgroundColor)
+
+            if(colorDistance > tolerance) continue
+        
+            const dx = x - centerX
+            const dy = y - centerY
+            const centerDistance = dx * dx + dy * dy
+
+            if(centerDistance < bestDistance){
+                bestDistance = centerDistance
+
+                best = { x, y}
+            }
+        }
+    }
+    return best
+}
+
+export function floodFillTextContainer(sourceData, maskData, imageWidth, imageHeight, box, backgroundAnalysis, containerAnalysis, options = {}){
+    if(!containerAnalysis?.enclosed) {
+        return{
+            valid: false,
+            reason: "not-enclosed"
+        }
+    }
+
+    const backgroundColor = backgroundAnalysis?.dominantColor
+
+    if(!backgroundColor) return {
+        valid: false,
+        reason: "no-background-color"
+    }
+
+    const {tolerance = 30, marginXFactor = 3, marginYFactor = 2, minMargin = 60, maxAreaFactor = 20} = options
+
+    const seed = findFloodSeed(sourceData, maskData, imageWidth, imageHeight, box, backgroundColor, tolerance)
+
+    if(!seed){
+        return{
+            valid: false,
+            reason: "seed-not-found"
+        }
+    }
+
+    const marginX = Math.max(minMargin, Math.round(box.width * marginXFactor))
+    const marginY = Math.max(minMargin, Math.round(box.height * marginYFactor))
+
+    const searchX1 = Math.max(0, Math.floor(box.x1 - marginX))
+    const searchY1 = Math.max(0, Math.floor(box.y1 - marginY))
+    const searchX2 = Math.min(imageWidth, Math.ceil(box.x2 + marginX))
+    const searchY2 = Math.min(imageHeight, Math.ceil(box.y2 + marginY))
+
+    const searchWidth = searchX2 - searchX1
+    const searchHeight = searchY2 - searchY1
+
+    if(searchWidth <= 0 || searchHeight <= 0){
+        return {
+            valid: false,
+            reason: "invalid-search-area"
+        }
+    }
+
+    const searchArea = searchWidth * searchHeight
+
+    const visited = new Uint8Array(searchArea)
+
+    const queue = new Int32Array(searchArea)
+
+    function toLocalIndex(x, y){
+        return ((y - searchY1) * searchWidth + (x - searchX1))
+    }
+
+    function isInsideSearch(x, y){
+        return (x >= searchX1 && y >= searchY1 && x < searchX2 && y < searchY2)
+    }
+
+    function matchesBackground(x, y){
+        const index = (y * imageWidth + x) * 4
+
+        if(maskData.data[index + 3] > 0) return false
+
+        const r = sourceData.data[index]
+        const g = sourceData.data[index + 1]
+        const b = sourceData.data[index + 2]
+
+        return (rgbDistance(r, g, b, backgroundColor) <= tolerance)
+    }
+
+    let head = 0
+    let tail = 0
+
+    const seedIndex = toLocalIndex(seed.x, seed.y)
+
+    visited[seedIndex] = 1
+    queue[tail++] = seedIndex
+
+    let minX = seed.x
+    let minY = seed.y
+    let maxX = seed.x
+    let maxY = seed.y
+
+    let pixelCount = 0
+
+    let touchesSearchBorder = false
+
+
+    const directions = [[-1, 0],[1, 0],[0, -1],[0, 1]]
+
+    while(head < tail){
+        const localIndex = queue[head++]
+        const localY = Math.floor(localIndex / searchWidth)
+        const localX = localIndex % searchWidth
+
+        const x = searchX1 + localX
+        const y = searchY1 + localY
+
+        pixelCount++
+
+        if(x < minX) minX = x
+        if(x > maxX) maxX = x
+
+        if(y < minY) minY = y
+        if(y > maxY) maxY = y
+
+        if(x === searchX1 || y === searchY1 || x === searchX2 - 1 || y === searchY2 - 1){
+            touchesSearchBorder = true
+        }
+
+        for(const [directionX, directionY] of directions){
+            const nextX = x + directionX
+            const nextY = y + directionY
+
+            if(!isInsideSearch(nextX, nextY)) continue
+
+            const nextIndex = toLocalIndex(nextX, nextY)
+
+            if(visited[nextIndex])continue
+
+            visited[nextIndex] = 1
+
+            if(!matchesBackground(nextX, nextY)) continue
+
+            queue[tail++] = nextIndex
+        }
+    }
+
+    const width = maxX - minX + 1
+    const height = maxY - minY + 1
+
+    const regionArea = width * height
+    const boxArea = box.width * box.height
+
+    if(touchesSearchBorder){
+        return {
+            valid: false,
+            reason: "touches-search-border",
+            seed,
+            pixelCount,
+            x1: minX,
+            y1: minY,
+            x2: maxX,
+            y2: maxY,
+            width,
+            height
+        }
+    }
+    if(regionArea > boxArea * maxAreaFactor){
+        return{
+            valid: false,
+            reason: "region-too-large",
+            seed,
+            pixelCount,
+            x1: minX,
+            y1: minY,
+            x2: maxX,
+            y2: maxY,
+            width,
+            height
+        }
+    }
+    return{
+        valid: true,
+        seed,
+        pixelCount,
+        x1: minX,
+        y1: minY,
+        x2: maxX + 1,
+        y2: maxY + 1,
+        width,
+        height,
+        touchesSearchBorder
+    }
+}
+
+export function translationBoxFromFloodRegion(region, originalBox, options = {}){
+    if(!region?.valid) return null
+
+    const { paddingRatioX = 0.08, paddingRatioY = 0.08, minPadding = 4} = options
+
+    const paddingX = Math.max(minPadding, Math.round(region.width * paddingRatioX))
+    const paddingY = Math.max(minPadding, Math.round(region.height * paddingRatioY))
+
+    const x1 = region.x1 + paddingX
+    const y1 = region.y1 + paddingY
+    const x2 = region.x2 - paddingX
+    const y2 = region.y2 - paddingY
+
+    const width = x2 - x1
+    const height = y2 - y1
+
+    if(width <= 0 || height <= 0) return null
+
+    if(width < originalBox.width * 0.7 || height < originalBox.height * 0.7) return null
+
+    return{
+        x1,
+        y1,
+        x2,
+        y2,
+        width,
+        height
+    }
+}
+
 export function detectTextContainer(sourceData, maskData, imageWidth, imageHeight, box, backgroundAnalysis, options = {}){
     if(!backgroundAnalysis || backgroundAnalysis.backgroundType !== "uniform"){
         return {
@@ -168,7 +416,7 @@ export function detectTextContainer(sourceData, maskData, imageWidth, imageHeigh
 
     const sides = {left, right, top, bottom}
 
-    const sidesFound = Object.values(sides).filter(side => sides.found).length
+    const sidesFound = Object.values(sides).filter(side => side.found).length
 
     const enclosed = sidesFound >= 3
 
@@ -181,24 +429,17 @@ export function detectTextContainer(sourceData, maskData, imageWidth, imageHeigh
     }
 }
 
-export function growTranslationBox(sourceData, maskData, imageWidth, imageHeight, box, backgroundAnalysis, options = {}){
-    const {tolerance = 30, requiredRatio = 0.72, step = 2, sampleStep = 2, maxWidthFactor = 1.5, maxHeightFactor = 1.15} = options
+export function growFreeTextBox(sourceData, maskData, imageWidth, imageHeight, box, backgroundAnalysis, options = {}){
+    const {tolerance = 38, requiredRatio = 0.78, step = 3, sampleStep = 2, maxWidthFactor = 2.4, maxExpandPerSideFactor = 0.80, minConsideredPixels =6} = options
 
-    if(!backgroundAnalysis || backgroundAnalysis.backgroundType !== "uniform") return {...box}
+    const backgroundColor = backgroundAnalysis?.dominantColor
+    if(!backgroundColor) return {...box}
 
-    const backgroundColor = backgroundAnalysis.dominantColor
     const originalWidth = box.width
-    const originalHeight = box.height
     const maxWidth = originalWidth * maxWidthFactor
-    const maxHeight = originalHeight * maxHeightFactor
-    const maxExpandX = (maxWidth - originalWidth) / 2
-    const maxExpandY = (maxHeight - originalHeight) / 2 
-
-    const minAllowedX1 = Math.max(0, box.x1 - maxExpandX)
-    const minAllowedY1 = Math.max(0, box.y1 - maxExpandY)
-    const maxAllowedX2 = Math.min(imageWidth, box.x2 + maxExpandX)
-    const maxAllowedY2 = Math.min(imageHeight, box.y2 + maxExpandY)
-
+    const maxExpandPerSide = originalWidth * maxExpandPerSideFactor
+    const minAllowedX1 = Math.max(0, box.x1 - maxExpandPerSide)
+    const maxAllowedX2 = Math.min(imageWidth, box.x2 + maxExpandPerSide)
 
     const result = {
         x1: box.x1,
@@ -209,7 +450,7 @@ export function growTranslationBox(sourceData, maskData, imageWidth, imageHeight
         height: box.height
     }
 
-    function regionMatchesBackground(x1, y1, x2, y2){
+    function stripMatchesBackground(x1, y1, x2, y2){
         x1 = Math.max(0, Math.floor(x1))
         y1 = Math.max(0, Math.floor(y1))
         x2 = Math.min(imageWidth, Math.ceil(x2))
@@ -217,6 +458,7 @@ export function growTranslationBox(sourceData, maskData, imageWidth, imageHeight
 
         let matches = 0
         let considered = 0
+
 
         for(let y = y1; y < y2; y += sampleStep){
             for(let x = x1; x < x2; x += sampleStep){
@@ -235,55 +477,42 @@ export function growTranslationBox(sourceData, maskData, imageWidth, imageHeight
                 if(distance <= tolerance) matches++
             }
         }
-        if(considered === 0) return false
+        if(considered < minConsideredPixels) return false
 
         return (matches / considered) >= requiredRatio
     }
 
+    let canGrowLeft = true
+    let canGrowRight = true
+    
     for(let pass = 0; pass < 100; pass++){
-        let changed = false
-
-        if(result.width < maxWidth){
+        if(!canGrowLeft && !canGrowRight) break
+        if(result.width >= maxWidth) break
+        if(canGrowLeft){
             const newX1 = Math.max(minAllowedX1, result.x1 - step)
-
-            if(newX1 < result.x1 && regionMatchesBackground(newX1, result.y1, result.x1, result.y2)){
+            if(newX1 < result.x1 && stripMatchesBackground(newX1, result.y1, result.x1, result.y2)){
                 result.x1 = newX1
-                changed = true
+            }else{
+                canGrowLeft = false
             }
         }
-        if(result.width < maxWidth){
+        result.width = result.x2 - result.x1
+
+        if(result.width >= maxWidth) break
+
+        if(canGrowRight){
             const newX2 = Math.min(maxAllowedX2, result.x2 + step)
-
-            if(newX2 > result.x2 && regionMatchesBackground(result.x2, result.y1, newX2, result.y2)){
+            if(newX2 > result.x2 && stripMatchesBackground(result.x2, result.y1, newX2, result.y2)){
                 result.x2 = newX2
-                changed = true
+            }else{
+                canGrowRight = false
             }
         }
         result.width = result.x2 - result.x1
-        
-        if(result.height < maxHeight){
-            const newY1 = Math.max(minAllowedY1, result.y1 - step)
-
-            if(newY1 < result.y1 && regionMatchesBackground(result.x1, newY1, result.x2, result.y1)){
-                result.y1 = newY1
-                changed = true
-            }
-        }
-
-        if(result.height < maxHeight){
-            const newY2 = Math.min(maxAllowedY2, result.y2 + step)
-
-            if(newY2 > result.y2 && regionMatchesBackground(result.x1, result.y2, result.x2, newY2)){
-                result.y2 = newY2
-                changed = true
-            }
-        }
-
-        result.width = result.x2 - result.x1
-        result.height = result.y2 - result.y1
-
-        if(!changed) break
     }
+    result.width = result.x2 - result.x1
+    result.height = result.y2 - result.y1
+
     return result
 }
 
@@ -937,13 +1166,19 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
         overlay.textContent = item.translation
         overlay.style.position = "absolute"
         overlay.style.boxSizing = "border-box"
-        overlay.style.padding = "3px"
         overlay.style.background = "transparent"
 
-        if(item.containerAnalysis?.enclosed){
-            overlay.style.border = "2px solid lime"
+        
+        if(item.layoutType === "container"){
+            overlay.style.border = "2px solid deepskyblue"
+        }else if(item.layoutType === "freeText"){
+            overlay.style.border = "2px solid magenta"
+            overlay.style.padding = "2px"
+            overlay.style.lineHeight = "1.05"
         }else{
             overlay.style.border = "1px solid red"
+            overlay.style.padding = "4px"
+            overlay.style.lineHeight = "1.1"
         }
 
         overlay.style.color = textColor
@@ -956,7 +1191,6 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
         overlay.style.wordBreak = "normal"
         overlay.style.overflow = "hidden"
         overlay.style.fontFamily = "Arial, sans-serif"
-        overlay.style.lineHeight = "1.1"
         overlay.style.pointerEvents = "none"
 
         layer.appendChild(overlay)
@@ -978,6 +1212,10 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
         layer.style.width = `${rect.width}px`
         layer.style.height = `${rect.height}px`
 
+        if(eraseCanvas){
+            eraseCanvas.style.width = `${rect.width}px`
+            eraseCanvas.style.height = `${rect.height}px`
+        }
 
         const scaleX = rect.width / imageElement.naturalWidth
         const scaleY = rect.height / imageElement.naturalHeight
@@ -990,12 +1228,16 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
             element.style.width = `${box.width * scaleX}px`
             element.style.height = `${box.height * scaleY}px`
 
-            fitTextToBox(element, 24, 6)
+            const maxFontSize = item.layoutType === "freeText" ? 22 : 24
+
+            fitTextToBox(element, maxFontSize, 6)
 
         })
     }
 
     let syncSchedule = false
+    let resizeTimer = null
+
     function scheduleSync(){
         if(syncSchedule) return
 
@@ -1007,10 +1249,20 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
         })
     }
 
+    function handleResize(){
+        scheduleSync()
+
+        clearTimeout(resizeTimer)
+
+        resizeTimer = setTimeout(() => {
+            scheduleSync()
+        }, 100);
+    }
+
     const resizeObserver = new ResizeObserver(() => {scheduleSync()})
 
     resizeObserver.observe(imageElement)
-    window.addEventListener("resize", scheduleSync)
+    window.addEventListener("resize", handleResize)
     window.addEventListener("scroll", scheduleSync, {passive: true})
 
     syncOverlay()
@@ -1020,7 +1272,9 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
     function destroy(){
         resizeObserver.disconnect()
 
-        window.removeEventListener("resize", scheduleSync)
+        clearTimeout(resizeTimer)
+
+        window.removeEventListener("resize", handleResize)
         window.removeEventListener("scroll", scheduleSync)
 
         layer.remove()

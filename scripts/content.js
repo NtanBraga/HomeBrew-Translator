@@ -1,4 +1,4 @@
-import { loadComicTextDetector, runComicTextDetector, cropTextBlocks, loadImage, preprocessImage, renderTranslationOverImage, createSegmentationMask, estimateBackgroundColor, measureBackgroundDeviation, analizeBlackgroundDominance, growTranslationBox, detectTextContainer } from "./manga/comicTextDetector"
+import { loadComicTextDetector, runComicTextDetector, cropTextBlocks, loadImage, preprocessImage, renderTranslationOverImage, createSegmentationMask, estimateBackgroundColor, measureBackgroundDeviation, analizeBlackgroundDominance, detectTextContainer, floodFillTextContainer, translationBoxFromFloodRegion, growFreeTextBox } from "./manga/comicTextDetector"
 
 const OCR_DEBUG = {events: []}
 
@@ -581,9 +581,12 @@ async function processMangaImage(imageElement, imageIndex, generation) {
         const translatedCrops = await translateAllMangaCrops(recognizedCrops)
 
         const baseMask = createSegmentationMask(detection.segmentation, preprocess.transform, 0.5)
-        const fillMask = dilateMaskCanvas(baseMask, 1)
+        const fillMask = dilateMaskCanvas(baseMask, 2)
         const inpaintMask = dilateMaskCanvas(baseMask,  4)
 
+        const baseMaskContext = baseMask.getContext("2d", { willReadFrequently:true })
+        if(!baseMaskContext) throw new Error("Não foi possivel ler basemask")
+        const analysisMaskData = baseMaskContext.getImageData(0, 0, baseMask.width, baseMask.height)
 
         const fillMaskContext = fillMask.getContext("2d", { willReadFrequently: true })
         if(!fillMaskContext) throw new Error("Não foi possivel ler fillMask")
@@ -607,13 +610,13 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
             if(generation !== translationGeneration) return
 
-            const deviation = measureBackgroundDeviation(sourceData, fillMaskData, sourceCanvas.width, sourceCanvas.height, item.box)
+            const deviation = measureBackgroundDeviation(sourceData, analysisMaskData, sourceCanvas.width, sourceCanvas.height, item.box)
 
-            const dominance = analizeBlackgroundDominance(sourceData, fillMaskData, sourceCanvas.width, sourceCanvas.height, item.box)
+            const dominance = analizeBlackgroundDominance(sourceData, analysisMaskData, sourceCanvas.width, sourceCanvas.height, item.box)
 
             let backgroundType
 
-            if(dominance.ratio >= 0.80){
+            if(dominance.ratio >= 0.80 && deviation < 25){
                 backgroundType = "uniform"
             }else if(dominance.ratio >= 0.60 || deviation < 25){
                 backgroundType = "mixed"
@@ -632,7 +635,7 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
             item.containerAnalysis = detectTextContainer(
                 sourceData,
-                fillMaskData,
+                analysisMaskData,
                 sourceCanvas.width,
                 sourceCanvas.height,
                 item.box,
@@ -641,13 +644,43 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
             debugOCR(`Crop ${item.index} - container: `, item.containerAnalysis)
 
-            item.translationBox = growTranslationBox(sourceData, fillMaskData, sourceCanvas.width, sourceCanvas.height, item.box, item.backgroundAnalysis)
 
+            item.floodRegion = floodFillTextContainer(
+                sourceData,
+                analysisMaskData,
+                sourceCanvas.width,
+                sourceCanvas.height,
+                item.box,
+                item.backgroundAnalysis,
+                item.containerAnalysis
+            )
+
+            debugOCR(`Crop ${item.index} - flood: `, item.floodRegion)
+
+            const floodTranslationBox = translationBoxFromFloodRegion(item.floodRegion, item.box)
+
+            if(floodTranslationBox){
+                item.layoutType = "container"
+                item.translationBox = floodTranslationBox
+            }else{
+                item.layoutType = "freeText"
+
+                item.translationBox = growFreeTextBox(
+                    sourceData,
+                    analysisMaskData,
+                    sourceCanvas.width,
+                    sourceCanvas.height,
+                    item.box,
+                    item.backgroundAnalysis
+                )
+            }
+            
             debugOCR(`Crop ${item.index} - translationBox: `, {
+                layoutType: item.layoutType,
+                source: floodTranslationBox ? "flood" : "freeTextGrow",
                 original: item.box,
                 expanded: item.translationBox
             })
-
 
             if(backgroundType === "uniform"){
                 localItems.push(item)
