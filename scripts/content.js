@@ -1,4 +1,4 @@
-import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview, loadImage, preprocessImage, renderTranslationOverImage, showSegmentationDebug, createSegmentationMask, estimateBackgroundColor, measureBackgroundDeviation, classifyBackground, analizeBlackgroundDominance, growTranslationBox } from "./manga/comicTextDetector"
+import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview, loadImage, preprocessImage, renderTranslationOverImage, showSegmentationDebug, createSegmentationMask, estimateBackgroundColor, measureBackgroundDeviation, classifyBackground, analizeBlackgroundDominance, growTranslationBox, detectTextContainer } from "./manga/comicTextDetector"
 
 const OCR_DEBUG = {events: []}
 
@@ -725,6 +725,17 @@ async function processMangaImage(imageElement, imageIndex, generation) {
             }
 
             debugOCR(`Crop ${item.index} - analise: `, item.backgroundAnalysis)
+
+            item.containerAnalysis = detectTextContainer(
+                sourceData,
+                fillMaskData,
+                sourceCanvas.width,
+                sourceCanvas.height,
+                item.box,
+                item.backgroundAnalysis
+            )
+
+            debugOCR(`Crop ${item.index} - container: `, item.containerAnalysis)
 
             item.translationBox = growTranslationBox(sourceData, fillMaskData, sourceCanvas.width, sourceCanvas.height, item.box, item.backgroundAnalysis)
 

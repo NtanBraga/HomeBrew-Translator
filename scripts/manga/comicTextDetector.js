@@ -115,6 +115,130 @@ function rgbDistance(r, g, b, color){
     return Math.sqrt((dr * dr + dg * dg + db * db) / 3)
 }
 
+function scanForContainerBoundary(sourceData, maskData, imageWidth, imageHeight, startX, startY, directionX, directionY, backgroundColor, options = {}){
+    const {tolerance = 35, maxDistance = 100, step = 2, minBackgroundSamples = 2} = options
+
+    const perpendicularX = -directionX
+    const perpendicularY = -directionY
+
+    let backgroundSamples = 0
+
+    for(let distance = step; distance <= maxDistance; distance += step){
+        const centerX = Math.round(startX + directionX * distance)
+        const centerY = Math.round(startY + directionY * distance)
+
+        if(centerX < 0 || centerY < 0 || centerX >= imageWidth || centerY >= imageHeight) return null
+
+        let matchesBackground = 0
+        let considered = 0
+
+        for(let offset = -1; offset <= 1; offset++){
+            const x = centerX + perpendicularX * offset
+            const y = centerY + perpendicularY * offset
+
+            if(x < 0 || y < 0 || x >= imageWidth || x >= imageHeight) continue
+
+            const index = (y * imageWidth + x) * 4
+
+            if(maskData.data[index + 3] > 0) continue
+
+            considered++
+
+            const r = sourceData.data[index]
+            const g = sourceData.data[index + 1]
+            const b = sourceData.data[index + 2]
+
+            const distanceFromBackground = rgbDistance(r, g, b, backgroundColor)
+
+            if(distanceFromBackground <= tolerance) matchesBackground++
+
+            if(considered === 0) continue
+
+            const backgroundRatio = matchesBackground / considered
+
+            if(backgroundRatio >= 0.67) {
+                backgroundSamples++
+                continue
+            }
+            if(backgroundSamples >= minBackgroundSamples) return distance
+        }
+    }
+    return null
+}
+
+export function detectTextContainer(sourceData, maskData, imageWidth, imageHeight, box, backgroundAnalysis, options = {}){
+    if(!backgroundAnalysis || backgroundAnalysis.backgroundType !== "uniform"){
+        return {
+            enclosed: false,
+            reason: "background-not-uniform",
+            sidesFound: 0,
+            sides: {}
+        }
+    }
+    const backgroundColor = backgroundAnalysis.dominantColor
+    const maxDistance = options.maxDistance ?? Math.min(120, Math.max(30, Math.max(box.width, box.height) * 0.8))
+    const scanOptions = {
+        tolerance: options.tolerance ?? 35,
+        maxDistance,
+        step: options.set ?? 2,
+        minBackgroundSamples: options.minBackgroundSamples ?? 2
+    }
+    const positions = [0.25, 0.50, 0.75]
+
+    function analyzeSide(createStartPoint, directionX, directionY){
+        const distances = []
+
+        for(const position of positions){
+            const {x, y} = createStartPoint(position)
+            const distance = scanForContainerBoundary(sourceData, maskData, imageWidth, imageHeight, x, y, directionX, directionY, backgroundColor, scanOptions)
+
+            distances.push(distance)
+        }
+
+        const hits = distances.filter(distance => distance !== null)
+
+        return {
+            found: hits.length >= 2,
+            hits: hits.length,
+            distances
+        }
+    }
+
+    const left = analyzeSide(position => ({
+        x: box.x1,
+        y: box.y1 + box.height * position
+    }), -1, 0)
+
+    const right = analyzeSide(position => ({
+        x: box.x2,
+        y: box.y1 + box.height * position
+    }), 1, 0)
+
+    const top = analyzeSide(position => ({
+        x: box.x1 + box.width * position,
+        y: box.y1
+    }), 0, -1)
+
+    const bottom = analyzeSide(position => ({
+        x: box.x1 + box.width * position,
+        y: box.y2
+    }), 0, 1)
+
+    const sides = {left, right, top, bottom}
+
+    const sidesFound = Object.values(sides).filter(side => sides.found).length
+
+    const enclosed = sidesFound >= 3
+
+    return {
+        enclosed,
+        sidesFound,
+        confidence: sidesFound / 4,
+        backgroundColor,
+        sides
+    }
+}
+
 export function growTranslationBox(sourceData, maskData, imageWidth, imageHeight, box, backgroundAnalysis, options = {}){
     const {tolerance = 30, requiredRatio = 0.72, step = 2, sampleStep = 2, maxWidthFactor = 1.5, maxHeightFactor = 1.15} = options
 
@@ -1075,7 +1199,13 @@ export function showTranslationPreview(image, translatedCrops){
         overlay.style.boxSizing = "border-box"
         overlay.style.padding = "4px"
         overlay.style.background = "rgba(255, 255, 255, 0.92)"
-        overlay.style.border = "1px solid red"
+
+        if(item.containerAnalysis?.enclosed){
+            overlay.style.border = "2px solid lime"
+        }else{
+            overlay.style.border = "1px solid red"
+        }
+
         overlay.style.color = "black"
         overlay.style.display = "flex"
         overlay.style.alignItems = "center"
@@ -1141,7 +1271,13 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
         overlay.style.boxSizing = "border-box"
         overlay.style.padding = "3px"
         overlay.style.background = "transparent"
-        overlay.style.border = "1px solid red"
+
+        if(item.containerAnalysis?.enclosed){
+            overlay.style.border = "2px solid lime"
+        }else{
+            overlay.style.border = "1px solid red"
+        }
+        
         overlay.style.color = textColor
         overlay.style.display = "flex"
         overlay.style.alignItems = "center"
