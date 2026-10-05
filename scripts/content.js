@@ -12,6 +12,10 @@ let mangaImageSequence = 0
 
 const waitingImages = new WeakSet()
 
+//batch for ollama
+
+const OLLAMA_BATCH_SIZE = 5
+
 //threading limit queue
 const CONCURRENCY = {
     images: 2,
@@ -210,6 +214,34 @@ async function recognizeAllMangaCrops(crops){
 
 //Detect - Translate
 
+function chunkArray(items,size){
+    const chunks = []
+
+    for(let i = 0; i < items.length; i += size){
+        chunks.push(items.slice(i, i + size))
+    }
+
+    return chunks
+}
+
+async function translateMangaBatch(items, sourceLanguage, targetLanguage){
+    const response = await chrome.runtime.sendMessage({
+        type:"OLLAMA_TRANSLATE_BATCH",
+        payload: {
+            items: items.map(item => ({
+                index: item.index,
+                text: item.text
+            })),
+            sourceLanguage,
+            targetLanguage
+        }
+    })
+
+    if(!response?.ok) throw new Error(response?.error || "Falha na tradução em batch")
+
+    return response.result
+} 
+
 async function translateMangaText(text, sourceLanguage,targetLanguage){
     const response = await chrome.runtime.sendMessage({
         type:"OLLAMA_TRANSLATE",
@@ -237,46 +269,6 @@ async function getTranslationSettings(){
         targetLanguage: settings.langTo || "eng"
     }
 }
-
-async function translateAllMangaCrops(recognizedCrops) {
-    const {sourceLanguage, targetLanguage} = await getTranslationSettings()
-
-    return await mapWithConcurrency(recognizedCrops, CONCURRENCY.translation, async (item, position) => {
-        debugOCR(`Traduzindo ${position + 1}/${recognizedCrops.length}`, item.text)
-
-        if(!item.text?.trim()){
-            return {
-                ...item,
-                correctedText: "",
-                translation: "",
-                corrections: []
-            }
-        }
-
-        try{
-            const translationResult = await translateMangaText(item.text, sourceLanguage, targetLanguage)
-
-            debugOCR(`Tradução crop ${item.index}`, translationResult)
-
-            return {
-                ...item,
-                correctedText: translationResult.correctedText,
-                translation: translationResult.translation,
-                corrections: translationResult.corrections || []
-            }
-        }catch(e){
-            debugOCRError(`Erro traduzindo crop ${item.index} `,e)
-            return {
-                ...item,
-                correctedText: item.text,
-                translation: "",
-                corrections: [],
-                translationError: e?.message || String(e)
-            }
-        }   
-    })
-}
-
 
 // find image candidate
 
@@ -597,78 +589,192 @@ async function requestMangaInpaint(imageCanvas, maskCanvas){
 async function recognizeAndTranslateCrops(crops){
     const {sourceLanguage,targetLanguage} = await getTranslationSettings()
 
+    const recognized = await recognizeAllMangaCrops(crops)
 
-    const results = new Array(crops.length)
-
-
-    await Promise.all(crops.map(async (crop,index) => {
-        let text = ""
-
-        try{
-            text =await ocrPool.run(() => recognizeMangaCrop(crop))
-            debugOCR(`OCR ${crop.index}:`,text)
-        }catch(e){
-
-            debugOCRError(`Erro OCR crop ${crop.index}:`,e)
-
-
-            results[index] = {
-                ...crop,
-                text: "",
-                translation: "",
-                ocrError:e?.message ||String(e)
-            }
-            return
-        }
-
-        if(
-            !text?.trim()
-        ){
-            results[index] = {
-                ...crop,
-                text,
-                correctedText: "",
-                translation: "",
-                corrections: []
-            }
-
-            return
-        }
-
-
-        try{
-
-            const translationResult =
-                await translationPool.run(
-                    () =>
-                        translateMangaText(
-                            text,
-                            sourceLanguage,
-                            targetLanguage
-                        )
-                )
-            debugOCR(`Tradução crop ${crop.index}`,translationResult)
-            results[index] = {
-                ...crop,
-                text,
-                correctedText:translationResult.correctedText,
-
-                translation: translationResult.translation,
-
-                corrections:translationResult.corrections ||[]
-            }
-        }catch(e){
-            debugOCRError(`Erro traduzindo crop ${crop.index}:`,e)
-            results[index] = {
-                ...crop,
-                text,
-                correctedText: text,
-                translation: "",
-                corrections: [],
-                translationError: e?.message || String(e)
-            }
-        }
+    const results = recognized.map(item => ({
+        ...item,
+        correctedText: item.text || "",
+        translation: "",
+        corrections: []
     }))
+
+    const translatable = recognized.filter(item => item.text?.trim())
+
+    const batches = chunkArray(translatable, OLLAMA_BATCH_SIZE)
+
+    debugOCR("Batches de tradução:",
+        {
+            texts: translatable.length,
+            batches: batches.length,
+            batchSize: OLLAMA_BATCH_SIZE
+        })
+
+    const indexToPosition = new Map(results.map((item, position) => [
+        item.index, position
+    ]))
+
+
+    const translationStartedAt = performance.now()
+    const batchesStartedAt = performance.now()
+
+
+    await Promise.all(
+        batches.map(async (batch,batchIndex) => {
+
+            const queuedAt = performance.now()
+
+            try{
+
+                const batchResult =
+                    await translationPool.run(async () => {
+                        const startedAt =performance.now()
+
+                        debugOCR(
+                            `Batch ${batchIndex + 1} iniciou`,
+                            {
+                                indexes:
+                                    batch.map(
+                                        item => item.index),
+                                queueWaitMs:
+                                    Math.round(startedAt - queuedAt)
+                            }
+                        )
+
+                        const result = await translateMangaBatch( batch,sourceLanguage,targetLanguage)
+                        const finishedAt = performance.now()
+
+                        debugOCR(
+                            `Batch ${batchIndex + 1} terminou`,
+                            {
+                                indexes: batch.map(item => item.index),
+                                requestMs: Math.round(finishedAt - startedAt),
+                                ollamaMs: result.totalDuration
+                                    ? Math.round(result.totalDuration / 1_000_000) : null,
+                                loadMs: result.loadDuration
+                                    ? Math.round(result.loadDuration / 1_000_000) : null,
+                                promptEvalMs: result.promptEvalDuration
+                                    ? Math.round(result.promptEvalDuration / 1_000_000) : null,
+                                evalMs: result.evalDuration
+                                    ? Math.round(result.evalDuration / 1_000_000) : null,
+                                evalCount: result.evalCount,
+                                items: result.items?.length,
+                                rawItems: result.rawItemCount,
+                                fallbackCount: result.fallbackCount
+                            }
+                        )
+                        return result
+                    })
+
+                for(const translated of batchResult.items || []){
+
+                    const position = indexToPosition.get(translated.index)
+
+                    if(position === undefined) continue
+                    
+                    results[position] = {
+                        ...results[position],
+                        correctedText: translated.correctedText,
+                        translation: translated.translation,
+                        corrections: translated.corrections || [],
+                        needsFallback: translated.needsFallback === true
+                    }
+                }
+            }catch(e){
+                debugOCRError(`Erro batch ${batchIndex + 1}`,e)
+
+                for(const item of batch){
+                    const position = indexToPosition.get(item.index)
+
+                    if(position === undefined) continue
+                    
+                    results[position].needsFallback = true
+                }
+            }
+        })
+    )
+
+    const batchesElapsedMs = Math.round(performance.now() - batchesStartedAt)
+
+    
+
+    debugOCR("Todos os batches concluídos",
+        {
+            elapsedMs: batchesElapsedMs,
+            batchCount: batches.length,
+            batchSize: OLLAMA_BATCH_SIZE
+        })
+
+    const fallbackItems = translatable.filter(item => {
+        const position = indexToPosition.get(item.index)
+
+        if(position === undefined) return false
+        const result = results[position]
+
+        return (result.needsFallback === true || !result.translation?.trim())
+    })
+
+    debugOCR("Fallbacks individuais concluídos",
+        {
+            count: fallbackItems.length,
+            indexes: fallbackItems.map(item => item.index)
+        })
+    
+
+    await Promise.all(
+        fallbackItems.map(async item => {
+             const position = indexToPosition.get(item.index)
+
+            if(position === undefined) return false
+            const result = results[position]
+
+            try{
+                const queuedAt = performance.now()
+
+                const translationResult = await translationPool.run(async () => {
+                    const startedAt =performance.now()
+
+                    debugOCR(
+                        `Fallback ${item.index + 1} iniciou`,
+                        {
+                            queueWaitMs: Math.round(startedAt - queuedAt)
+                        }
+                    )
+
+                    const result = await translateMangaText(item.text,sourceLanguage,targetLanguage)
+                    debugOCR(`Fallback crop ${item.index} terminou`,
+                    {
+                        requestMs:
+                            Math.round(performance.now() - startedAt),
+                        ollamaMs: result.totalDuration
+                            ? Math.round(result.totalDuration / 1_000_000)
+                            : null, 
+                        evalCount: result.evalCount
+                    })
+                    return result
+                })
+                results[position] = {
+                    ...results[position],
+                    correctedText: translationResult.correctedText || item.text,
+                    translation: translationResult.translation ||  "",
+                    corrections: translationResult.corrections || [],                
+                    needsFallback: false,
+                    usedFallback: true
+                }
+            }catch(e){
+               debugOCRError( `Fallback crop ${item.index} falhou`, e) 
+
+               results[position].translationError = e?.message || String(e)
+            }
+        })
+    )
+
+    debugOCR("Fase de tradução concluída",
+        {
+            elapsedMs: Math.round(performance.now() - translationStartedAt),
+            batchesElapsedMs,
+            fallbackCount: fallbackItems.length
+        })
+
     return results
 }
 

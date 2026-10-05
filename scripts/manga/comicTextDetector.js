@@ -786,7 +786,7 @@ function nonMaxSupression(boxes, iouThreshold = CTD_NMS_THRESHOLD){
     return selected
 }
 
-function configureOnnxRuntime(){
+async function configureOnnxRuntime(){
     const wasmUrl = chrome.runtime.getURL("runtime/onnx/" + "ort-wasm-simd-threaded.asyncify.wasm")
     //const mjsUrl = chrome.runtime.getURL("runtime/onnx/" + "ort-wasm-simd-threaded.jsep.mjs")
 
@@ -799,12 +799,20 @@ function configureOnnxRuntime(){
     ort.env.wasm.numThreads = 1
     ort.env.wasm.proxy = false 
 
+    const adapter = await navigator.gpu.requestAdapter()
     
+    if(!adapter) throw new Error("Não foi possivel obter GPUAdapter")
+
+    const device = await adapter.requestDevice()
+    console.log("[CTD] WebGPU device: ", device)
+
     console.log("[CTD] wasmUrl: ", wasmUrl)
     console.log("[CTD] WebGPU disponivel: ", !!navigator.gpu)
     console.log("[CTD] hardwareConcurrency: ", navigator.hardwareConcurrency)
     console.log("[CTD] crossOriginIsolated: ", globalThis.crossOriginIsolated)
     console.log("[CTD] SharedArrayBuffer: ", typeof SharedArrayBuffer !== "undefined")
+
+    return device
 }
 
 function calculateLetterbox(originalWidth, originalHeight, targetSize = CTD_INPUT_SIZE){
@@ -1014,7 +1022,7 @@ export async function loadComicTextDetector(){
         return session
     }
 
-    configureOnnxRuntime()
+    const device = await configureOnnxRuntime()
 
     const modelUrl = chrome.runtime.getURL(MODEL_PATH)
 
@@ -1031,13 +1039,13 @@ export async function loadComicTextDetector(){
 
     console.log("Criando InferenceSession...")
 
-    const executionProviders = ["webgpu"]
+    const executionProviders = [{name: "webgpu", device}]
     console.log("[CTD] executionProviders: ", executionProviders)
 
     //navigation.gpu ? ["webgpu", "wasm"] : ["wasm"]
 
     session = await ort.InferenceSession.create(modelBuffer, {
-        executionProviders: executionProviders, graphOptimizationLevel: "all"
+        executionProviders, graphOptimizationLevel: "all"
     })
 
     console.log("CTD carregado com sucesso")

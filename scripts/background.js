@@ -1,6 +1,6 @@
 import './hot-take.js'
 
-import { translateWithOllama,isOllamaAvailable,isTranslationModelInstalled, warmUpTranslationModel, unloadTranslationModel } from './services/ollama'
+import { translateWithOllama,isOllamaAvailable,isTranslationModelInstalled, warmUpTranslationModel, unloadTranslationModel, translateBatchWithOllama } from './services/ollama'
 
 let activeTranslations = 0
 let unloadRequested = false
@@ -194,6 +194,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
         })()
 
+        return true
+    }
+
+    if(message?.type === "OLLAMA_TRANSLATE_BATCH"){
+
+        ;(async () => {
+
+            let translationStarted = false
+
+            try{
+                const enabled = await translationIsEnabled()
+
+                if(!enabled || unloadRequested){
+                    sendResponse({
+                        ok: false,
+                        error: "Translation is disabled"
+                    })
+                    return
+                }
+
+                activeTranslations++
+                translationStarted = true
+
+                console.log("Ollama batch started: ", {
+                    activeTranslations,
+                    itemCount: message.payload?.items?.length
+                })
+
+                const result = await translateBatchWithOllama(message.payload)
+
+                sendResponse({
+                    ok: true,
+                    result
+                })
+            }catch(e){
+                console.error("Ollama batch error: ", e)
+                sendResponse({
+                    ok: false,
+                    error: e?.message || String(e)
+                })
+            }finally{
+                if(translationStarted){
+                    activeTranslations = Math.max(0, activeTranslations - 1)
+                }
+                const enabled = await translationIsEnabled()
+
+                if(!enabled || unloadRequested){
+                    try{
+                        await unloadIfPossible()
+                    }catch(e){
+                        console.error("Deferred Ollama unload failed: ", e)
+                    }
+                }
+            }
+        })()
         return true
     }
 

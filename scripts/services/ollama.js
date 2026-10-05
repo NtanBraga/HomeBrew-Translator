@@ -47,7 +47,37 @@ const OLLAMA_CONFIG = {
     model: "kaelri/hy-mt2:7b",
     timeout: 120000,
     keepAlive: "2m",
-    numCtx: 2048
+    warmupKeepAlive: "30s",
+    numCtx: 1024
+}
+
+const BATCH_TRANSLATION_SCHEMA = {
+    type: "object",
+    properties: {
+        items: {
+            type: "array",
+            items: {
+                type: "object",
+                properties: {
+                    i: {
+                        type: "integer"
+                    },
+                    c: {
+                        type: "string"
+                    },
+                    t: {
+                        type: "string"
+                    },
+                },
+                required: [
+                    "i",
+                    "c",
+                    "t"
+                ]
+            }
+        }
+    },
+    required: ["items"]
 }
 
 let warmupPromise = null
@@ -108,6 +138,44 @@ function buildTranslationPrompt({
         ${text}
 
         Return only the requested structured response.
+    `.trim()
+}
+
+function buildBatchTranslationPrompt({items, sourceLanguage, targetLanguage}){
+    const source = getLanguageName(sourceLanguage)
+    const target = getLanguageName(targetLanguage)
+    const compactItems = items.map(item => [item.index, item.text])
+
+     return `
+        Translate manga OCR text from ${source} to ${target}.
+
+        All items are from the same manga page.
+        Use neighboring items as context, but translate each item independently.
+
+        Rules:
+        - Preserve meaning and tone.
+        - Preserve slang, profanity and adult language.
+        - Preserve names and proper nouns.
+        - Correct only obvious OCR errors.
+        - Never invent text.
+        - Never merge or reorder items.
+        - Return every input index exactly once.
+        - "c" must remain in ${source}.
+        - "t" must be the ${target} translation.
+        - "t" must not be empty.
+
+        Input format:
+        [index, OCR text]
+
+        Input:
+        ${JSON.stringify(compactItems)}
+
+        Output fields:
+        i = original index
+        c = corrected source-language OCR text
+        t = translation
+
+        Return only the structured response.
     `.trim()
 }
 
@@ -172,34 +240,33 @@ export async function warmUpTranslationModel(){
     if(warmupPromise) return warmupPromise
 
     warmupPromise = (async () => {
-        const startedAt = performance.now()
-    
-        const response = await ollamaFetch("/api/generate", {
+
+        const StartedAt = performance.now()
+
+        const response = await ollamaFetch("/api/chat", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
                 model:OLLAMA_CONFIG.model,
-                prompt: "",
+                messages: [],
                 stream: false,
-                keep_alive: OLLAMA_CONFIG.keepAlive,
-                options: {
-                    num_ctx: OLLAMA_CONFIG.numCtx
-                }
+                keep_alive: OLLAMA_CONFIG.warmupKeepAlive,
+                options: { num_ctx: OLLAMA_CONFIG.numCtx}
             })
         })  
 
         const data = await response.json()
 
-        const elapsed = performance.now() - startedAt
         const result = {
             model: data.model || OLLAMA_CONFIG.model,
-            elapsedMs: Math.round(elapsed),
-            loadDurationNs: Number(data.load_duration) || 0,
-            totalDurationNs: Number(data.total_duration) || 0
+            elapsedMs: Math.round(performance.now() - StartedAt),
+            totalDurationMs: data.total_duration ? Math.round(data.total_duration / 1_000_000) : null,
+            loadDurationMs: data.load_duration ? Math.round(data.load_duration / 1_000_000) : null,
         }
-        console.log("Ollama model warmed up:", result)
+
+        console.log("Ollama warmup ready:", result)
 
         return result
     
@@ -240,6 +307,96 @@ export async function unloadTranslationModel(){
         unloaded: true
     }
 
+
+}
+
+export async function translateBatchWithOllama({items, sourceLanguage="jpn",targetLanguage="eng"}){
+    if(warmupPromise){
+        try{
+            await warmupPromise
+        }catch(e){
+            console.warn("Ollama warmup failed before batch translation: ", e)
+        }
+    }
+    if(!Array.isArray(items) || items.length === 0) throw new Error("No items provided for batch translation")
+
+    const validItems = items.filter(item => item.text?.trim())
+
+    if(validItems.length === 0){
+        return { items: [] }
+    }
+
+    const prompt = buildBatchTranslationPrompt({items: validItems, sourceLanguage, targetLanguage})
+    const body = {
+        model: OLLAMA_CONFIG.model,
+        messages: [{
+            role: "user",
+            content: prompt
+        }],
+        stream: false,
+        format: BATCH_TRANSLATION_SCHEMA,
+        keep_alive: OLLAMA_CONFIG.keepAlive,
+        options: {
+            temperature: 0.1,
+            top_p: 0.6,
+            top_k: 20,
+            repeat_penalty: 1.05,
+            num_ctx: OLLAMA_CONFIG.numCtx,
+            num_predict: 384
+        }
+    }
+    const response = await ollamaFetch("/api/chat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body)
+    })
+    const data = await response.json()
+    const content = data.message?.content
+
+    if(!content) throw new Error("Ollama returned an empty batch response")
+
+    let result
+
+    try{
+        result = JSON.parse(content)
+    }catch(e){
+        console.error("Invalid Ollama batch JSON: ", content)
+        throw new Error("Ollama returned invalid batch JSON")
+    }
+
+    const outputItems = Array.isArray(result.items) ? result.items : []
+
+    const byIndex = new Map(outputItems.map(item => [Number(item.i), item]))
+
+    const normalizedItems = validItems.map(sourceItem => {
+        const translated = byIndex.get(sourceItem.index)
+        const correctedText = typeof translated?.c === "string" && translated.c.trim()
+            ? translated.c.trim()
+            : sourceItem.text
+        const translation = typeof translated?.t === "string"
+            ? translated.t.trim()
+            : ""
+    
+        return {
+            index: sourceItem.index,
+            correctedText,
+            translation,
+            corrections: [],
+            needsFallback: !translated || !translation
+        }
+    })
+
+    return {
+        items: normalizedItems,
+        model: data.model,
+        totalDuration: data.total_duration,
+        loadDuration: data.load_duration,
+        promptEvalDuration: data.prompt_eval_duration,
+        evalDuration: data.eval_duration,
+        evalCount: data.eval_count,
+        rawItemCount: outputItems.length,
+        fallbackCount: normalizedItems.filter(item => item.needsFallback).length
+    }
 
 }
 
@@ -286,7 +443,7 @@ export async function translateWithOllama({
             top_k: 20,
             repeat_penalty: 1.05,
             num_ctx: OLLAMA_CONFIG.numCtx,
-            num_predict: 1024
+            num_predict: 256
         }
     }
 
