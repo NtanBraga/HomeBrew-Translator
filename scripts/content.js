@@ -8,11 +8,44 @@ let translationGeneration = 0
 const mangaOverlayController = new Map()
 
 let mangaMutationObserver = null
-let mangaProcessQueue = Promise.resolve()
 let mangaImageSequence = 0
 
 const waitingImages = new WeakSet()
 
+//threading limit queue
+const CONCURRENCY = {
+    images: 2,
+    ocr: 2,
+    translation: 2,
+    inpaint: 2
+}
+
+async function mapWithConcurrency(items, limit, worker){
+    if(items.length === 0) return []
+
+    const results = new Array(items.length)
+
+    let nextIndex = 0
+
+    async function runWorker(){
+        while(true){
+            const index = nextIndex++
+
+            if(index >= items.length) return
+
+            results[index] = await worker(items[index], index)
+        }
+    }
+    const workerCount = Math.min(limit, items.length)
+
+    await Promise.all(Array.from(
+        {
+            length: workerCount
+        },
+        () => runWorker()
+    ))
+    return results
+}
 
 function debugOCR(label, value){
     
@@ -148,42 +181,36 @@ async function recognizeMangaCrop(crop){
 }
 
 async function recognizeAllMangaCrops(crops){
-    const result = []
-
-    let successCounts = 0
-
-    for(const crop of crops){
-        debugOCR(`OCR ${crop.index + 1}/${crops.length}`)
+    const results = await mapWithConcurrency(crops, CONCURRENCY.ocr, async(crop, position) => {
+        debugOCR(`OCR ${position + 1}/${crops.length}`)
 
         try{
             const text = await recognizeMangaCrop(crop)
 
-            successCounts++
+            debugOCR(`OCR ${crop.index}:`, text)
 
-            debugOCR(`Crop ${crop.index}: `, text)
-
-            result.push({
-                ...crop,
-                text
-            })
+            return {...crop, text}
         }catch(e){
             debugOCRError(`Erro OCR crop ${crop.index}: `, e)
-            result.push({
+
+            return {
                 ...crop,
                 text: "",
                 ocrError: e?.message || String(e)
-            })
+            }
         }
-    }
+    })
 
-    if(crops.length > 0 && successCounts == 0) throw new Error("Manga-OCR indisponivel: todos os crops falharam")
+    const successCount = results.filter(item => !item.ocrError).length
 
-    return result
+    if(crops.length > 0 && successCount == 0) throw new Error("Manga-OCR indisponivel: todos os crops falharam.")
+
+    return results
 }
 
 //Detect - Translate
 
-async function transalteMangaText(text, sourceLanguage,targetLanguage){
+async function translateMangaText(text, sourceLanguage,targetLanguage){
     const response = await chrome.runtime.sendMessage({
         type:"OLLAMA_TRANSLATE",
         payload: {
@@ -214,47 +241,42 @@ async function getTranslationSettings(){
 async function translateAllMangaCrops(recognizedCrops) {
     const {sourceLanguage, targetLanguage} = await getTranslationSettings()
 
-    const results = []
-
-    for(let i = 0; i < recognizedCrops.length; i++){
-        const item = recognizedCrops[i]
-
-        debugOCR(`Traduzindo ${i + 1}/${recognizedCrops.length}`, item.text)
+    return await mapWithConcurrency(recognizedCrops, CONCURRENCY.translation, async (item, position) => {
+        debugOCR(`Traduzindo ${position + 1}/${recognizedCrops.length}`, item.text)
 
         if(!item.text?.trim()){
-            results.push({
+            return {
                 ...item,
                 correctedText: "",
                 translation: "",
                 corrections: []
-            })
-            continue
+            }
         }
 
         try{
-            const translationResult = await transalteMangaText(item.text, sourceLanguage, targetLanguage)
+            const translationResult = await translateMangaText(item.text, sourceLanguage, targetLanguage)
+
             debugOCR(`Tradução crop ${item.index}`, translationResult)
 
-            results.push({
+            return {
                 ...item,
                 correctedText: translationResult.correctedText,
                 translation: translationResult.translation,
                 corrections: translationResult.corrections || []
-            })
+            }
         }catch(e){
-            debugOCRError(`Erro traduzindo crop ${item.index}`, e)
-
-            results.push({
+            debugOCRError(`Erro traduzindo crop ${item.index} `,e)
+            return {
                 ...item,
                 correctedText: item.text,
                 translation: "",
                 corrections: [],
                 translationError: e?.message || String(e)
-            })
-        }
-    }
-    return results
+            }
+        }   
+    })
 }
+
 
 // find image candidate
 
@@ -282,6 +304,52 @@ function isMangaImageCandidate(image){
 
 }
 
+function createTaskPool(limit){
+    let activeCount = 0
+    const queue = []
+
+    function runNext(){
+        while(activeCount < limit && queue.length > 0){
+            const job = queue.shift()
+            activeCount++
+            Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => {
+                activeCount--
+                runNext()
+            })
+        }
+    }
+    function run(task){
+        return new Promise((resolve, reject) => {
+            queue.push({
+                task,resolve,reject
+            })
+            runNext()
+        })
+    }
+    function clear(){
+        while(queue.length > 0){
+            const job = queue.shift()
+
+            job.resolve(undefined)
+        }
+    }
+    return {
+        run,
+        clear,
+        get activeCount() {
+            return activeCount
+        },
+        get queuedCount(){
+            return queue.length
+        }
+    }
+}
+
+//POOLS
+
+const mangaImagePool = createTaskPool(CONCURRENCY.images)
+const ctdPool = createTaskPool(1)
+
 function enqueueMangaImage(imageElement){
     if(!isMangaImageCandidate(imageElement)) return
 
@@ -292,18 +360,17 @@ function enqueueMangaImage(imageElement){
 
     debugOCR(`Imagem ${imageIndex} adicinada a fila`)
 
-    mangaProcessQueue = mangaProcessQueue.then(async () => {
+    mangaImagePool.run(async () => {
         if(generation !== translationGeneration) return
 
         const settings = await getMangaTranslationState()
 
         if(!settings.active || settings.mode !== OCR_MODE.MANGA) return
-
         if(imageElement.dataset.homebrewOcrStatus === "translated") return
 
         await processMangaImage(imageElement, imageIndex, generation)
     }).catch(error => {
-        debugOCRError(`Erro na fila da imagem ${imageIndex}:`, error)
+        debugOCRError(`Erro na fila da imagem ${imageIndex}: `, error)
     })
 }
 
@@ -561,7 +628,8 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
         if(generation !== translationGeneration) return
 
-        const detection = await runComicTextDetector(preprocess.tensor, preprocess.transform)
+
+        const detection = await ctdPool.run(() => runComicTextDetector(preprocess.tensor, preprocess.transform))
 
         if(generation !== translationGeneration) return
 
@@ -712,19 +780,30 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
         restorationContext.putImageData(restorationData, 0, 0)
 
-        for(const item of inpaintItems){
-            if(generation !== translationGeneration) return
+
+        const inpaintResults = await mapWithConcurrency(inpaintItems, CONCURRENCY.inpaint, async item => {
+            if(generation !== translationGeneration) return null
+
             debugOCR(`Crop ${item.index}: inpainting`)
 
-            const region = createInpaintRegion(preprocess.image, inpaintMask, item.box, 8)
+            const region =  createInpaintRegion(preprocess.image, inpaintMask, item.box, 8)
             const inpaintResult = await requestMangaInpaint(region.imageCanvas, region.maskCanvas)
-            
-            if(generation !== translationGeneration) return
 
-            const inpaintImage = await loadImage(inpaintResult)
+            if(generation !== translationGeneration) return null
 
-            restorationContext.drawImage(inpaintImage, region.crop.x, region.crop.y, region.crop.width, region.crop.height)
+            const image = await loadImage(inpaintResult)
+
+            return {region, image}
+        })
+        
+        if(generation !== translationGeneration) return
+
+        for(const result of inpaintResults){
+            if(!result) continue
+
+            restorationContext.drawImage(result.image, result.region.crop.x, result.region.crop.y, result.region.crop.width, result.region.crop.height)
         }
+        
 
         if(generation !== translationGeneration) return
 
@@ -797,7 +876,8 @@ function stopMangaTranslation(){
 
     stopMangaMutationObserver()
 
-    mangaProcessQueue = Promise.resolve()
+    mangaImagePool.clear()
+    ctdPool.clear()
 
     clearMangaTranslations()
 }

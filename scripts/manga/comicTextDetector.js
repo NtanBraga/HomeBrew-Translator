@@ -794,11 +794,12 @@ function configureOnnxRuntime(){
         wasm: wasmUrl,
         mjs: mjsUrl
     }
-    ort.env.wasm.numThreads = 1
+    ort.env.wasm.numThreads = 0
     ort.env.wasm.proxy = false
 
-    console.log("WASM: ", wasmUrl)
-    console.log("MJS: ", mjsUrl)
+    console.log("[CTD] hardwareConcurrency: ", navigator.hardwareConcurrency)
+    console.log("[CTD] crossOriginIsolated: ", globalThis.crossOriginIsolated)
+    console.log("[CTD] SharedArrayBuffer: ", typeof SharedArrayBuffer !== "undefined")
 }
 
 function calculateLetterbox(originalWidth, originalHeight, targetSize = CTD_INPUT_SIZE){
