@@ -22,8 +22,7 @@
       [
         "scripts/debug.js", 
         "models/comic-text-detector/comictextdetector.pt.onnx",
-        "runtime/onnx/ort-wasm-simd-threaded.mjs",
-        "runtime/onnx/ort-wasm-simd-threaded.wasm",
+        "runtime/onnx/*",
         "assets/image/test.png",
         "fonts/ComicNeue-Bold.woff2",
         "fonts/ComicNeue-Regular.woff2"

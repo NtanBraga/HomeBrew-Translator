@@ -1,4 +1,4 @@
-import * as ort from "onnxruntime-web/wasm"
+import * as ort from "onnxruntime-web/webgpu"
 
 const MODEL_PATH = "models/comic-text-detector/comictextdetector.pt.onnx"
 const CTD_INPUT_SIZE = 1024
@@ -787,16 +787,21 @@ function nonMaxSupression(boxes, iouThreshold = CTD_NMS_THRESHOLD){
 }
 
 function configureOnnxRuntime(){
-    const wasmUrl = chrome.runtime.getURL("runtime/onnx/ort-wasm-simd-threaded.wasm")
-    const mjsUrl = chrome.runtime.getURL("runtime/onnx/ort-wasm-simd-threaded.mjs")
+    const wasmUrl = chrome.runtime.getURL("runtime/onnx/" + "ort-wasm-simd-threaded.asyncify.wasm")
+    //const mjsUrl = chrome.runtime.getURL("runtime/onnx/" + "ort-wasm-simd-threaded.jsep.mjs")
 
     ort.env.wasm.wasmPaths = {
         wasm: wasmUrl,
-        mjs: mjsUrl
+        //mjs: mjsUrl
     }
-    ort.env.wasm.numThreads = 0
-    ort.env.wasm.proxy = false
+    
+    //console.log("[CTD] mjsUrl: ", mjsUrl)
+    ort.env.wasm.numThreads = 1
+    ort.env.wasm.proxy = false 
 
+    
+    console.log("[CTD] wasmUrl: ", wasmUrl)
+    console.log("[CTD] WebGPU disponivel: ", !!navigator.gpu)
     console.log("[CTD] hardwareConcurrency: ", navigator.hardwareConcurrency)
     console.log("[CTD] crossOriginIsolated: ", globalThis.crossOriginIsolated)
     console.log("[CTD] SharedArrayBuffer: ", typeof SharedArrayBuffer !== "undefined")
@@ -1026,8 +1031,13 @@ export async function loadComicTextDetector(){
 
     console.log("Criando InferenceSession...")
 
+    const executionProviders = ["webgpu"]
+    console.log("[CTD] executionProviders: ", executionProviders)
+
+    //navigation.gpu ? ["webgpu", "wasm"] : ["wasm"]
+
     session = await ort.InferenceSession.create(modelBuffer, {
-        executionProviders: ["wasm"]
+        executionProviders: executionProviders, graphOptimizationLevel: "all"
     })
 
     console.log("CTD carregado com sucesso")
@@ -1042,10 +1052,20 @@ export async function runComicTextDetector(tensor, transform){
 
     const inputName = session.inputNames[0]
 
+    const inferenceStart = performance.now()
+
     const outputs = await session.run({ [inputName]: tensor })
+
+    const inferenceEnd = performance.now()
+
+    const decodeStart = performance.now()
 
     const boxes = decodeBlockOutput(outputs.blk, transform)
 
+    const decodeEnd = performance.now()
+
+    console.log("[CTD] inference: ", `${(inferenceEnd - inferenceStart).toFixed(1)} ms`)
+    console.log("[CTD] decode: ", `${(decodeEnd - decodeStart).toFixed(1)} ms`)
 
     return {boxes, segmentation: outputs.seg}
 }

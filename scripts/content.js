@@ -348,6 +348,8 @@ function createTaskPool(limit){
 //POOLS
 
 const mangaImagePool = createTaskPool(CONCURRENCY.images)
+const ocrPool = createTaskPool(CONCURRENCY.ocr)
+const translationPool = createTaskPool(CONCURRENCY.translation)
 const ctdPool = createTaskPool(1)
 
 function enqueueMangaImage(imageElement){
@@ -592,6 +594,84 @@ async function requestMangaInpaint(imageCanvas, maskCanvas){
     return response.image
 }
 
+async function recognizeAndTranslateCrops(crops){
+    const {sourceLanguage,targetLanguage} = await getTranslationSettings()
+
+
+    const results = new Array(crops.length)
+
+
+    await Promise.all(crops.map(async (crop,index) => {
+        let text = ""
+
+        try{
+            text =await ocrPool.run(() => recognizeMangaCrop(crop))
+            debugOCR(`OCR ${crop.index}:`,text)
+        }catch(e){
+
+            debugOCRError(`Erro OCR crop ${crop.index}:`,e)
+
+
+            results[index] = {
+                ...crop,
+                text: "",
+                translation: "",
+                ocrError:e?.message ||String(e)
+            }
+            return
+        }
+
+        if(
+            !text?.trim()
+        ){
+            results[index] = {
+                ...crop,
+                text,
+                correctedText: "",
+                translation: "",
+                corrections: []
+            }
+
+            return
+        }
+
+
+        try{
+
+            const translationResult =
+                await translationPool.run(
+                    () =>
+                        translateMangaText(
+                            text,
+                            sourceLanguage,
+                            targetLanguage
+                        )
+                )
+            debugOCR(`Tradução crop ${crop.index}`,translationResult)
+            results[index] = {
+                ...crop,
+                text,
+                correctedText:translationResult.correctedText,
+
+                translation: translationResult.translation,
+
+                corrections:translationResult.corrections ||[]
+            }
+        }catch(e){
+            debugOCRError(`Erro traduzindo crop ${crop.index}:`,e)
+            results[index] = {
+                ...crop,
+                text,
+                correctedText: text,
+                translation: "",
+                corrections: [],
+                translationError: e?.message || String(e)
+            }
+        }
+    }))
+    return results
+}
+
 async function fetchPageImageasDataUrl(imageElement){
     const url = imageElement.currentSrc || imageElement.src
     const response = await chrome.runtime.sendMessage({
@@ -607,9 +687,24 @@ async function fetchPageImageasDataUrl(imageElement){
 }
 
 async function preparePageImage(imageElement){
+    const totalStart = performance.now()
+
+    const fetchStart = performance.now()
     const dataUrl = await fetchPageImageasDataUrl(imageElement)
+    const fetchEnd = performance.now()
+
+    const loadStart = performance.now()
     const image = await loadImage(dataUrl)
+    const loadEnd = performance.now()
+
+    const preprocessStart = performance.now()
     const preprocess = preprocessImage(image)
+    const preprocessEnd = performance.now()
+
+    debugOCR("[CTD] fetch: ", `${(fetchEnd - fetchStart).toFixed(1)} ms`)
+    debugOCR("[CTD] load image: ", `${(loadEnd - loadStart).toFixed(1)} ms`)
+    debugOCR("[CTD] preprocess: ", `${(preprocessEnd - preprocessStart).toFixed(1)} ms`)
+    debugOCR("[CTD] prepare total: ", `${(performance.now() - totalStart).toFixed(1)} ms`)
 
     return{
         imageElement,
@@ -642,11 +737,8 @@ async function processMangaImage(imageElement, imageIndex, generation) {
         }
 
         const crops = cropTextBlocks(preprocess.image, detection.boxes)
-        const recognizedCrops = await recognizeAllMangaCrops(crops)
-
-        if(generation !== translationGeneration) return
-
-        const translatedCrops = await translateAllMangaCrops(recognizedCrops)
+        
+        const translatedCrops = await recognizeAndTranslateCrops(crops) 
 
         const baseMask = createSegmentationMask(detection.segmentation, preprocess.transform, 0.5)
         const fillMask = dilateMaskCanvas(baseMask, 2)
@@ -878,6 +970,8 @@ function stopMangaTranslation(){
 
     mangaImagePool.clear()
     ctdPool.clear()
+    ocrPool.clear()
+    translationPool.clear() 
 
     clearMangaTranslations()
 }
