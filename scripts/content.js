@@ -1,4 +1,4 @@
-import { testOnnxRuntime, testComicTextDetectorFile, loadComicTextDetector, testImagePreprocessing, runComicTextDetector, drawDebugBoxes, cropTextBlocks, showDebugCrops, showTranslationPreview, loadImage, preprocessImage, renderTranslationOverImage, showSegmentationDebug, createSegmentationMask, estimateBackgroundColor, measureBackgroundDeviation, classifyBackground, analizeBlackgroundDominance, growTranslationBox, detectTextContainer } from "./manga/comicTextDetector"
+import { loadComicTextDetector, runComicTextDetector, cropTextBlocks, loadImage, preprocessImage, renderTranslationOverImage, createSegmentationMask, estimateBackgroundColor, measureBackgroundDeviation, analizeBlackgroundDominance, growTranslationBox, detectTextContainer } from "./manga/comicTextDetector"
 
 const OCR_DEBUG = {events: []}
 
@@ -135,7 +135,7 @@ function clearMangaTranslations(){
 async function recognizeMangaCrop(crop){
     const imageBase64 = crop.canvas.toDataURL("image/png")
 
-    console.log(`Enviando crop ${crop.index} para Manga-OCR`)
+    debugOCR(`Enviando crop ${crop.index} para Manga-OCR`)
 
     const response = await chrome.runtime.sendMessage({
         type: "MANGA_OCR",
@@ -150,11 +150,15 @@ async function recognizeMangaCrop(crop){
 async function recognizeAllMangaCrops(crops){
     const result = []
 
+    let successCounts = 0
+
     for(const crop of crops){
         debugOCR(`OCR ${crop.index + 1}/${crops.length}`)
 
         try{
             const text = await recognizeMangaCrop(crop)
+
+            successCounts++
 
             debugOCR(`Crop ${crop.index}: `, text)
 
@@ -171,6 +175,9 @@ async function recognizeAllMangaCrops(crops){
             })
         }
     }
+
+    if(crops.length > 0 && successCounts == 0) throw new Error("Manga-OCR indisponivel: todos os crops falharam")
+
     return result
 }
 
@@ -381,7 +388,7 @@ function dilateMaskCanvas(maskCanvas, radius = 2){
     result.width = width
     result.height = height
 
-    const resultContext = result.getContext("2d")
+    const resultContext = result.getContext("2d", { willReadFrequently: true })
     const resultData = resultContext.createImageData(width, height)
 
     for(let y = 0; y < height; y++){
@@ -479,33 +486,6 @@ function createInpaintRegion(image, dilatedMask, box, padding=8){
     }
 }
 
-function drawLocalEraseForCrop(context, sourceData, maskData, imageWidth, imageHeight, item){
-    const box = item.box
-
-    const backgroundColor = estimateBackgroundColor(sourceData, maskData, imageWidth, imageHeight, box)
-
-    const x1 = Math.max(0, Math.floor(box. x1))
-    const y1 = Math.max(0, Math.floor(box. y1))
-    const x2 = Math.min(imageWidth, Math.ceil(box. x2))
-    const y2 = Math.min(imageHeight, Math.ceil(box. y2))
-
-    const imageData = context.getImageData(0, 0, imageWidth, imageHeight)
-
-    for(let y = y1; y < y2; y++){
-        for(let x = x1; x < x2; x++){
-            const index = (y * imageWidth + x) * 4
-
-            if(maskData.data[index + 3] === 0) continue
-
-            imageData.data[index] = backgroundColor.r
-            imageData.data[index + 1] = backgroundColor.g
-            imageData.data[index + 2] = backgroundColor.b
-            imageData.data[index + 3] = 255
-        }
-    }
-    context.putImageData(imageData, 0, 0)
-}
-
 function applyLocalEraseToImageData(restorationData, sourceData, maskData, imageWidth, imageHeight, item){
     const box = item.box
 
@@ -543,70 +523,6 @@ async function requestMangaInpaint(imageCanvas, maskCanvas){
     if(!response.ok) throw new Error(response?.error || "Manga inpainting falhou")
 
     return response.image
-}
-
-export function createTextEraseCanvas(image, segmentationTensor, transform, translatedCrops, threshold = 0.5, dilationRadius = 2){
-    const mask = createSegmentationMask(segmentationTensor, transform, threshold)
-    
-    const dilatedMask = dilateMaskCanvas(mask, dilationRadius)
-
-    const sourceCanvas = document.createElement("canvas")
-    sourceCanvas.width = transform.originalWidth
-    sourceCanvas.height = transform.originalHeight
-
-    const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true})
-    const maskContext = dilatedMask.getContext("2d", { willReadFrequently: true})
-
-    if(!maskContext) throw new Error("Não foi possivel ler manga")
-    if(!sourceContext) throw new Error("Não foi possivel criar source canvas")
-
-    sourceContext.drawImage(image, 0, 0, sourceCanvas.width, sourceCanvas.height)
-
-    const sourceData = sourceContext.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height)
-    const maskData = maskContext.getImageData(0, 0, dilatedMask.width, dilatedMask.height)
-
-    const eraseCanvas = document.createElement("canvas")
-
-    eraseCanvas.width = transform.originalWidth
-    eraseCanvas.height = transform.originalHeight
-    
-    const eraseContext = eraseCanvas.getContext("2d")
-
-    if(!eraseContext) throw new Error("Não foi possivel criar erase canvas")
-
-    const eraseData = eraseContext.createImageData(eraseCanvas.width, eraseCanvas.height)
-
-    translatedCrops.forEach(item => {
-        if(!item.translation?.trim()) return
-
-        const box = item.box
-
-        const backgroundColor = estimateBackgroundColor(sourceData, maskData, eraseCanvas.width, eraseCanvas.height, box)
-
-        debugOCR(`Background crop ${item.index}: `, backgroundColor)
-
-        const x1 = Math.max(0, Math.floor(box.x1))
-        const y1 = Math.max(0, Math.floor(box.y1))
-        const x2 = Math.min(eraseCanvas.width, Math.ceil(box.x2))
-        const y2 = Math.min(eraseCanvas.height, Math.ceil(box.y2))
-
-        for(let y = y1; y < y2; y++){
-            for(let x = x1; x < x2; x++){
-                const index = (y * eraseCanvas.width + x) * 4
-
-                if(maskData.data[index + 3] === 0) continue
-
-                eraseData.data[index] = backgroundColor.r
-                eraseData.data[index + 1] = backgroundColor.g
-                eraseData.data[index + 2] = backgroundColor.b
-                eraseData.data[index + 3] = 255
-            }
-        }
-    })
-
-    eraseContext.putImageData(eraseData, 0, 0)
-
-    return eraseCanvas
 }
 
 async function fetchPageImageasDataUrl(imageElement){
@@ -647,11 +563,9 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
         const detection = await runComicTextDetector(preprocess.tensor, preprocess.transform)
 
-        //showSegmentationDebug(preprocess.image, detection.segmentation, preprocess.transform)
-
         if(generation !== translationGeneration) return
 
-        console.log(`Imagem ${imageIndex}: `, detection.boxes.length, " blocos encontrados")
+        debugOCR(`Imagem ${imageIndex}: `, detection.boxes.length, " blocos encontrados")
 
         if(detection.boxes.length === 0){
             imageElement.dataset.homebrewOcrStatus = "done"
@@ -665,16 +579,6 @@ async function processMangaImage(imageElement, imageIndex, generation) {
         if(generation !== translationGeneration) return
 
         const translatedCrops = await translateAllMangaCrops(recognizedCrops)
-
-        // const eraseCanvas = createTextEraseCanvas
-        // (
-        //     preprocess.image,
-        //     detection.segmentation,
-        //     preprocess.transform,
-        //     translatedCrops,
-        //     0.5,
-        //     2
-        // )
 
         const baseMask = createSegmentationMask(detection.segmentation, preprocess.transform, 0.5)
         const fillMask = dilateMaskCanvas(baseMask, 1)
@@ -797,7 +701,7 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
         imageElement.dataset.homebrewOcrStatus = "translated"
         
-        console.log(`Imagem ${imageIndex} concluida`)
+        debugOCR(`Imagem ${imageIndex} concluida`)
 
     }catch(e){
         imageElement.dataset.homebrewOcrStatus = "error"
@@ -805,15 +709,6 @@ async function processMangaImage(imageElement, imageIndex, generation) {
         debugOCRError(`Erro processando imagem ${imageIndex}`, e)
     }
 }
-
-// ComicTextDetector && onnxRunTime config
-
-debugOCR("Iniciando content.js")
-
-testOnnxRuntime()
-
-debugOCR("Passou de testOnnxRuntime")
-
 //init
 
 async function startMangaTranslation(){
@@ -852,7 +747,7 @@ async function startMangaTranslation(){
             enqueueMangaImage(image)
         }
 
-        console.log("Processamento Manga concluido.")
+        debugOCR("Processamento Manga concluido.")
     }catch(e){
         debugOCRError("Erro no modo Manga: ", e)
     }finally{

@@ -36,38 +36,6 @@ function median(values){
     return values[Math.floor(values.length / 2)]
 }
 
-function measureBackgroundVarlance(sourceData, maskData, imageWidth, imageHeight, box){
-    const values = []
-
-    const x1 = Math.max(0, Math.floor(box.x1))
-    const y1 = Math.max(0, Math.floor(box.y1))
-    const x2 = Math.min(imageWidth, Math.ceil(box.x2))
-    const y2 = Math.min(imageHeight, Math.ceil(box.y2))
-
-    for(let y = y1; y < y2; y +=2){
-        for(let x = x1; x < x2; x += 2){
-            const index = (y * imageWidth + x) * 4
-
-            if(maskData.data[index + 3] > 0) continue
-
-            const r = sourceData.data[index]
-            const g = sourceData.data[index + 1]
-            const b = sourceData.data[index + 2]
-        
-            values.push((r + g + b) / 3)
-        }
-    }
-    if(values.length === 0) return 0
-
-    const mean = values.reduce((a, b) => a + b, 0) / values .length
-    const variance = values.reduce((sum, value) => {
-        const diff = value - mean
-        return sum + diff * diff
-    }, 0) / values.length
-
-    return Math.sqrt(variance)
-}
-
 function getReadableTextColor(backgroundColor){
     if(!backgroundColor) return "black"
 
@@ -78,33 +46,6 @@ function getReadableTextColor(backgroundColor){
     if(luminance < 140) return "white"
 
     return "black"
-}
-
-function expandTranslationBox(box, imageWidth, imageHeight, factorX = 1.6, factorY = 1.15){
-    const centerX = (box.x1 + box.x2) / 2
-    const centerY = (box.y1 + box.y2) / 2
-
-    const newWidth = box.width * factorX
-    const newHeight = box.height * factorY
-
-    let x1 = centerX - newWidth / 2
-    let y1 = centerY - newHeight / 2
-    let x2 = centerX + newWidth / 2
-    let y2 = centerY + newHeight / 2
-
-    x1 = Math.max(0, x1)
-    y1 = Math.max(0, y1)
-    x2 = Math.min(imageWidth, x2)
-    y2 = Math.min(imageHeight, y2)
-
-    return {
-        x1,
-        y1,
-        x2,
-        y2,
-        width: x2 - x1,
-        height: y2 - y1
-    }
 }
 
 function rgbDistance(r, g, b, color){
@@ -118,8 +59,8 @@ function rgbDistance(r, g, b, color){
 function scanForContainerBoundary(sourceData, maskData, imageWidth, imageHeight, startX, startY, directionX, directionY, backgroundColor, options = {}){
     const {tolerance = 35, maxDistance = 100, step = 2, minBackgroundSamples = 2} = options
 
-    const perpendicularX = -directionX
-    const perpendicularY = -directionY
+    const perpendicularX = -directionY
+    const perpendicularY = directionX
 
     let backgroundSamples = 0
 
@@ -136,7 +77,7 @@ function scanForContainerBoundary(sourceData, maskData, imageWidth, imageHeight,
             const x = centerX + perpendicularX * offset
             const y = centerY + perpendicularY * offset
 
-            if(x < 0 || y < 0 || x >= imageWidth || x >= imageHeight) continue
+            if(x < 0 || y < 0 || x >= imageWidth || y >= imageHeight) continue
 
             const index = (y * imageWidth + x) * 4
 
@@ -152,16 +93,17 @@ function scanForContainerBoundary(sourceData, maskData, imageWidth, imageHeight,
 
             if(distanceFromBackground <= tolerance) matchesBackground++
 
-            if(considered === 0) continue
-
-            const backgroundRatio = matchesBackground / considered
-
-            if(backgroundRatio >= 0.67) {
-                backgroundSamples++
-                continue
-            }
-            if(backgroundSamples >= minBackgroundSamples) return distance
         }
+
+        if(considered === 0) continue
+
+        const backgroundRatio = matchesBackground / considered
+
+        if(backgroundRatio >= 0.67) {
+            backgroundSamples++
+            continue
+        }
+        if(backgroundSamples >= minBackgroundSamples) return distance
     }
     return null
 }
@@ -180,7 +122,7 @@ export function detectTextContainer(sourceData, maskData, imageWidth, imageHeigh
     const scanOptions = {
         tolerance: options.tolerance ?? 35,
         maxDistance,
-        step: options.set ?? 2,
+        step: options.step ?? 2,
         minBackgroundSamples: options.minBackgroundSamples ?? 2
     }
     const positions = [0.25, 0.50, 0.75]
@@ -405,16 +347,6 @@ export function measureBackgroundDeviation(sourceData, maskData, imageWidth, ima
 
 }
 
-export function classifyBackground(deviation){
-    if(deviation < 12){
-        return "uniform"
-    }else if(deviation < 25){
-        return "mixed"
-    }else{
-        return "complex"
-    }
-}
-
 export function estimateBackgroundColor(sourceData, maskData, imageWidth, imageHeight, box){
     const reds = []
     const greens = []
@@ -529,8 +461,6 @@ function decodeBlockOutput(blockTensor, transform){
     const data = blockTensor.data
     const dims = blockTensor.dims
 
-    console.log("Decodificando blk: ", dims)
-
     if(dims.length !== 3 || dims[2] !== 7) throw new Error(`Formato blk inesperado ${dims}`)
 
     const predictionCount = dims[1]
@@ -576,11 +506,8 @@ function decodeBlockOutput(blockTensor, transform){
             classId
         })
     }
-    console.log("Candidatos apos confidence:",candidates.length)
 
     const selected = nonMaxSupression(candidates)
-
-    console.log("Caixas apos NMS: ", selected.length)
 
     return scaleBoxesToOriginal(selected, transform)
 }
@@ -620,7 +547,6 @@ function configureOnnxRuntime(){
     ort.env.wasm.numThreads = 1
     ort.env.wasm.proxy = false
 
-    console.log("ONNX WASM configurado")
     console.log("WASM: ", wasmUrl)
     console.log("MJS: ", mjsUrl)
 }
@@ -724,45 +650,6 @@ export function createSegmentationMask(segmentationTensor, transform, threshold 
     return originalCanvas
 }
 
-export function showSegmentationDebug(image, segmentationTensor, transform){
-    const mask = createSegmentationMask(segmentationTensor, transform, 0.5)
-    const canvas = document.createElement("canvas")
-
-    canvas.width = image.naturalWidth
-    canvas.height = image.naturalHeight
-
-    const context = canvas.getContext("2d")
-
-    if(!context) throw new Error("Não foi possivel criar debug da segmentation")
-
-    context.drawImage(
-        image,
-        0,
-        0,
-        canvas.width,
-        canvas.height
-    )
-    context.drawImage(
-        mask,
-        0,
-        0
-    )
-
-    canvas.style.position = "fixed"
-    canvas.style.right = "10px"
-    canvas.style.top = "10px"
-    canvas.style.maxWidth = "50vw"
-    canvas.style.maxHeight = "90vh"
-    canvas.style.width = "auto"
-    canvas.style.height = "auto"
-    canvas.style.zIndex = "205"
-    canvas.style.border = "2px solid black"
-
-    document.body.appendChild(canvas)
-
-    return canvas
-}
-
 export function loadImage(url){
     return new Promise((resolve, reject) => {
         const image = new Image()
@@ -822,20 +709,6 @@ export function preprocessImage(image){
         1, 3, CTD_INPUT_SIZE, CTD_INPUT_SIZE
     ])
 
-    console.log("Quantidade de valores RGBA: ", imageData.data.length)
-
-    console.log("Image original: ", {
-        width: image.naturalWidth,
-        height: image.naturalHeight
-    })
-    console.log("Letterbox: ", {
-        ratio,
-        resizedWidth,
-        resizedHeight,
-        paddingRight,
-        paddingBottom
-    })
-
     return {
         tensor,
         transform: {
@@ -879,88 +752,6 @@ function scaleBoxesToOriginal(boxes, transform){
     })    
 }
 
-function inspectOutputs(outputs){
-    console.log("Output names: ", Object.keys(outputs))
-
-    for(const [name, tensor] of Object.entries(outputs)){
-        console.log(`OUTPUT: ${name }`)
-        console.log("type: ", tensor.type)
-        console.log("dims: ", tensor.dims)
-        console.log("size: ", tensor.size)
-        console.log("sample:", tensor.data.slice(0,20))
-    }
-}
-
-export function drawDebugBoxes(image, boxes){
-    const canvas = document.createElement("canvas")
-
-    canvas.width = image.naturalWidth
-    canvas.height = image.naturalHeight
-
-    const context = canvas.getContext("2d")
-
-    if(!context) throw new Error("Não foi possivel criar canvas de debug")
-
-    context.drawImage(image, 0, 0, image.naturalWidth, image.naturalHeight)
-    context.lineWidth = 3
-    context.strokeStyle = "red"
-    context.font = "16px Arial"
-    context.fillStyle = "red"
-
-    boxes.forEach((box, index) => {
-        context.strokeRect(box.x1, box.y1, box.width, box.height)
-        context.fillText(
-            `${index} - ${(box.confidence * 100).toFixed(1)}%`,
-            box.x1, Math.max(16, box.y1 - 5)
-        )
-    })
-    return canvas
-}
-
-export function testOnnxRuntime(){
-    console.log("ONNX Runtime: ", ort)
-    console.log("ONNX Runtime carregado com sucesso")
-}
-
-export async function testImagePreprocessing(){
-    const imageUrl = chrome.runtime.getURL("assets/image/test.png")
-    const image = await loadImage(imageUrl)
-
-    if(image !== undefined){
-        console.log("Imagem de teste carregada")
-    }else{
-        console.error("Imagem não foi carregada")
-    }
-    
-
-    const result = preprocessImage(image)
-    console.log("Tensor criado: ", result.tensor)
-    console.log("Tensor dimensions: ", result.tensor.dims)
-    console.log("Tensor type: ", result.tensor.type)
-    console.log("Transform: ", result.transform)
-    console.log("Primeiros valores: ", result.tensor.data.slice(0, 10))
-
-    return {...result, image}
-}
-
-export async function testComicTextDetectorFile(){
-    const modelUrl = chrome.runtime.getURL(MODEL_PATH)
-
-    console.log("CTD URL: ", modelUrl)
-
-    const response = await fetch(modelUrl)
-
-    console.log("CTD HTTP status: ", response.status)
-
-    if(!response.ok) throw new Error(`Não foi possivel carregar CTD: HTTP ${response.status}`)
-
-    const buffer = await response.arrayBuffer()
-
-    console.log("CTD carregado: ", buffer.byteLength, " bytes")
-
-    return buffer
-}
-
 export async function loadComicTextDetector(){
     if(session){
         console.log("CTD já está carregado")
@@ -1000,21 +791,12 @@ export async function runComicTextDetector(tensor, transform){
 
     const inputName = session.inputNames[0]
 
-    console.time("CTD inference")
-
     const outputs = await session.run({ [inputName]: tensor })
-
-    console.timeEnd("CTD inference")
 
     const boxes = decodeBlockOutput(outputs.blk, transform)
 
-    console.log("TEXT BLOCKS: ", boxes)
 
-    console.log("Executando CTD..")
-
-    inspectOutputs(outputs)
-
-    return {boxes, segmentation: outputs.seg, lineDetection: outputs.det}
+    return {boxes, segmentation: outputs.seg}
 }
 
 //crop text blocks
@@ -1074,42 +856,6 @@ export function cropTextBlocks(image, boxes){
     return crops
 }
 
-export function showDebugCrops(crops){
-    const container = document.createElement("div")
-
-    container.style.position = "fixed"
-    container.style.left = "10px"
-    container.style.top = "10px"
-    container.style.maxHeight = "90vh"
-    container.style.width = "260px"
-    container.style.overflowY = "auto"
-    container.style.background = "white"
-    container.style.border = "2px solid black"
-    container.style.padding = "8px"
-    container.style.zIndex = 201
-
-    crops.forEach(item => {
-        const wrapper = document.createElement("div")
-        wrapper.style.marginBottom = "12px"
-        const title = document.createElement("div")
-        title.textContent = `Block ${item.index} - ${(item.box.confidence * 100).toFixed(1)}%`
-        title.style.color = "black"
-        title.style.fontSize = "14px"
-        
-        item.canvas.style.maxWidth = "100%"
-        item.canvas.style.height = "auto"
-        item.canvas.style.border = "1px solid #999"
-
-        wrapper.appendChild(title)
-        wrapper.appendChild(item.canvas)
-
-        container.appendChild(wrapper)
-    })
-    document.body.appendChild(container)
-
-    return container
-}
-
 //visual translation
 
 function fitTextToBox(element, maxFontSize = 24, minFontSize = 6){
@@ -1148,84 +894,6 @@ function fitTextToBox(element, maxFontSize = 24, minFontSize = 6){
         fits: false,
         fontSize: minFontSize
     }
-}
-
-export function showTranslationPreview(image, translatedCrops){
-    const viewport = document.createElement("div")
-
-    viewport.style.position = "fixed"
-    viewport.style.top = "10px"
-    viewport.style.right = "10px"
-    viewport.style.maxWidth = "60vw"
-    viewport.style.maxHeight = "95vh"
-    viewport.style.overflow = "auto"
-    viewport.style.background = "white"
-    viewport.style.border = "2px solid black"
-    viewport.style.zIndex = "202"
-
-    const wrapper = document.createElement("div")
-
-    wrapper.style.position = "relative"
-    wrapper.style.width = `${image.naturalWidth}px`
-    wrapper.style.height = `${image.naturalHeight}px`
-
-    const imageElement = document.createElement("img")
-
-    imageElement.src = image.src
-
-    imageElement.style.position = "absolute"
-    imageElement.style.left = "0"
-    imageElement.style.top = "0"
-    imageElement.style.width = `${image.naturalWidth}px`
-    imageElement.style.height = `${image.naturalHeight}px`
-
-    wrapper.appendChild(imageElement)
-    viewport.appendChild(wrapper)
-    document.body.appendChild(viewport)
-
-    translatedCrops.forEach(item => {
-        if(!item.translation?.trim()) return
-
-        const box = item.translationBox || item.box
-        const overlay = document.createElement("div")
-
-        overlay.textContent = item.translation
-        
-        overlay.style.position = "absolute"
-        overlay.style.left = `${box.x1}px`
-        overlay.style.top = `${box.y1}px`
-        overlay.style.width = `${box.width}px`
-        overlay.style.height = `${box.height}px`
-        overlay.style.boxSizing = "border-box"
-        overlay.style.padding = "4px"
-        overlay.style.background = "rgba(255, 255, 255, 0.92)"
-
-        if(item.containerAnalysis?.enclosed){
-            overlay.style.border = "2px solid lime"
-        }else{
-            overlay.style.border = "1px solid red"
-        }
-
-        overlay.style.color = "black"
-        overlay.style.display = "flex"
-        overlay.style.alignItems = "center"
-        overlay.style.justifyContent = "center"
-        overlay.style.textAlign = "center"
-        overlay.style.whiteSpace = "normal"
-        overlay.style.overflowWrap = "break-word"
-        overlay.style.wordBreak = "normal"
-        overlay.style.overflow = "hidden"
-        overlay.style.fontFamily = "Arial, sans-serif"
-        overlay.style.lineHeight = "1.1"
-        overlay.style.pointerEvents = "none"
-
-        wrapper.appendChild(overlay)
-        const fitting = fitTextToBox(overlay, 24, 6)
-
-        console.log(`Crop ${item.index}: `, fitting)
-    })
-
-    return viewport
 }
 
 export function renderTranslationOverImage(imageElement, translatedCrops, eraseCanvas){
@@ -1277,7 +945,7 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
         }else{
             overlay.style.border = "1px solid red"
         }
-        
+
         overlay.style.color = textColor
         overlay.style.display = "flex"
         overlay.style.alignItems = "center"
