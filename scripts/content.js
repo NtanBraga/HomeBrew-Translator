@@ -728,7 +728,7 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
         if(generation !== translationGeneration) return
 
-        const overlayController = renderTranslationOverImage(imageElement, translatedCrops, restorationCanvas)
+        const overlayController = await renderTranslationOverImage(imageElement, translatedCrops, restorationCanvas)
 
         mangaOverlayController.set(imageElement, overlayController)
 

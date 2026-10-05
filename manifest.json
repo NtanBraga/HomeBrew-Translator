@@ -24,7 +24,9 @@
         "models/comic-text-detector/comictextdetector.pt.onnx",
         "runtime/onnx/ort-wasm-simd-threaded.mjs",
         "runtime/onnx/ort-wasm-simd-threaded.wasm",
-        "assets/image/test.png"
+        "assets/image/test.png",
+        "fonts/ComicNeue-Bold.woff2",
+        "fonts/ComicNeue-Regular.woff2"
       ],
       "matches": ["<all_urls>"]
     }

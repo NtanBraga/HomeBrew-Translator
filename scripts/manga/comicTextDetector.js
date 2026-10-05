@@ -6,6 +6,27 @@ const CTD_CONFIDENCE_THRESHOLD = 0.4
 const CTD_NMS_THRESHOLD = 0.35
 
 let session = null
+let mangaFontsLoaded = false
+
+async function loadMangaFonts(){
+    if(mangaFontsLoaded) return
+
+    const regularUrl = chrome.runtime.getURL("fonts/ComicNeue-Regular.woff2")
+    const boldUrl = chrome.runtime.getURL("fonts/ComicNeue-Bold.woff2")
+
+    const regular = new FontFace("Homebrew Manga", `url(${regularUrl})`, { weight: "400" })
+    const bold = new FontFace("Homebrew Manga", `url(${boldUrl})`, { weight: "700" })
+
+    await Promise.all([
+        regular.load(),
+        bold.load()
+    ])
+
+    document.fonts.add(regular)
+    document.fonts.add(bold)
+
+    mangaFontsLoaded = true
+}
 
 function calculateIoU(a, b){
     const intersectionX1 = Math.max(a.x1, b.x1) 
@@ -1087,45 +1108,40 @@ export function cropTextBlocks(image, boxes){
 
 //visual translation
 
-function fitTextToBox(element, maxFontSize = 24, minFontSize = 6){
+function fitTextToBox(element, maxFontSize = 28, minFontSize = 8){
     let min = minFontSize
     let max = maxFontSize
-    let best = null
+    let best = minFontSize
+    let foundFit = false
 
     while(min <= max){
-        const size = Math.floor((min + max) / 2)
+        const fontSize = Math.floor((min + max) / 2)
 
-        element.style.fontSize = `${size}px`
+        element.style.fontSize = `${fontSize}px`
 
-        const fitsWidth = element.scrollWidth <= element.clientWidth 
-        const fitsHeight = element.scrollHeight <= element.clientHeight
+        const fitsWidth = element.scrollWidth <= element.clientWidth + 1
+        const fitsHeight = element.scrollHeight <= element.clientHeight + 1
 
         if(fitsHeight && fitsWidth){
-            best = size
-            min = size + 1
+            best = fontSize
+            foundFit = true
+            min = fontSize + 1
         }else{
-            max = size - 1
+            max = fontSize - 1
         }
     }
 
-    if(best !== null){
-        element.style.fontSize = `${best}px`
-        
-        return {
-            fits: true,
-            fontSize: best
-        }
-    }
-
-    element.style.fontSize = `${minFontSize}px`
+    element.style.fontSize = `${best}px`
 
     return {
-        fits: false,
-        fontSize: minFontSize
+        fits: foundFit,
+        fontSize: best
     }
 }
 
-export function renderTranslationOverImage(imageElement, translatedCrops, eraseCanvas){
+export async function renderTranslationOverImage(imageElement, translatedCrops, eraseCanvas){
+
+    await loadMangaFonts()
 
     const oldLayer = imageElement.__homebrewTranslationLayer
 
@@ -1161,41 +1177,56 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
         const overlay = document.createElement("div")
 
         const backgroundColor = item.backgroundAnalysis?.dominantColor
+
         const textColor = getReadableTextColor(backgroundColor)
 
-        overlay.textContent = item.translation
+        const textElement = document.createElement("span")
+
+        textElement.textContent = item.translation
+        textElement.style.display = "block"
+        textElement.style.width = "100%"
+        textElement.style.textAlign = "center"
+        textElement.style.textWrap = "balance"
+        textElement.style.hyphens = "none"
+        textElement.style.wordBreak = "normal"
+        textElement.style.overflowWrap = "normal"
+        textElement.style.whiteSpace = "normal"
+
+        if(item.layoutType === "container"){
+            textElement.style.transform = "translateY(-0.05em)"
+        }else{
+            textElement.style.transform = "none"
+        }
+
+        overlay.appendChild(textElement)
+
         overlay.style.position = "absolute"
         overlay.style.boxSizing = "border-box"
         overlay.style.background = "transparent"
-
-        
-        if(item.layoutType === "container"){
-            overlay.style.border = "2px solid deepskyblue"
-        }else if(item.layoutType === "freeText"){
-            overlay.style.border = "2px solid magenta"
-            overlay.style.padding = "2px"
-            overlay.style.lineHeight = "1.05"
-        }else{
-            overlay.style.border = "1px solid red"
-            overlay.style.padding = "4px"
-            overlay.style.lineHeight = "1.1"
-        }
-
+        overlay.style.border = "none"
         overlay.style.color = textColor
         overlay.style.display = "flex"
         overlay.style.alignItems = "center"
         overlay.style.justifyContent = "center"
-        overlay.style.textAlign = "center"
-        overlay.style.whiteSpace = "normal"
-        overlay.style.overflowWrap = "break-word"
-        overlay.style.wordBreak = "normal"
         overlay.style.overflow = "hidden"
-        overlay.style.fontFamily = "Arial, sans-serif"
+        overlay.style.fontFamily = '"Homebrew Manga", sans-serif'
         overlay.style.pointerEvents = "none"
+
+        if(item.layoutType === "container"){
+            overlay.style.padding = "3px"
+            overlay.style.lineHeight = "1"
+            overlay.style.fontWeight = "400"
+            overlay.style.letterSpacing = "-0.15px"
+        }else{
+            overlay.style.padding = "2px"
+            overlay.style.lineHeight = "1"
+            overlay.style.fontWeight = "700"
+            overlay.style.letterSpacing = "0"
+        }
 
         layer.appendChild(overlay)
 
-        overlays.push({element: overlay, item})
+        overlays.push({element: overlay, textElement, item, textColor})
     })
 
     function syncOverlay(){
@@ -1220,7 +1251,10 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
         const scaleX = rect.width / imageElement.naturalWidth
         const scaleY = rect.height / imageElement.naturalHeight
 
-        overlays.forEach(({element, item}) => {
+        const imageScale = Math.min(scaleX, scaleY)
+        const fontScale = Math.max(0.5, Math.min(imageScale, 2))
+
+        overlays.forEach(({element,textElement, item, textColor}) => {
             const box = item.translationBox || item.box
 
             element.style.left = `${box.x1 * scaleX}px`
@@ -1228,9 +1262,27 @@ export function renderTranslationOverImage(imageElement, translatedCrops, eraseC
             element.style.width = `${box.width * scaleX}px`
             element.style.height = `${box.height * scaleY}px`
 
-            const maxFontSize = item.layoutType === "freeText" ? 22 : 24
+            const baseMaxFontSize = item.layoutType === "container" ? 28 : 24
+            const baseMinFontSize = 10
 
-            fitTextToBox(element, maxFontSize, 6)
+            const maxFontSize = Math.max(8, Math.round(baseMaxFontSize * fontScale))
+            const minFontSize = Math.max(6, Math.round(baseMinFontSize * fontScale))
+
+            const fit = fitTextToBox(element, maxFontSize, Math.min(minFontSize, maxFontSize))
+
+            if(item.layoutType === "freeText" && fit.fontSize >= 12){
+                const outlineColor = textColor === "white" ? "black" : "white"
+
+                textElement.style.textShadow = 
+                    `
+                        -1px 0 0 ${outlineColor},
+                        1px 0 0 ${outlineColor},
+                        0 -1px 0 ${outlineColor},
+                        0 1px 0 ${outlineColor}
+                    `
+            }else{
+                textElement.style.textShadow = "none"
+            }
 
         })
     }
