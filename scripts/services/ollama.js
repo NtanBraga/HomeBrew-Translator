@@ -116,14 +116,11 @@ function buildBatchTranslationSchema(items){
     const itemSchema = {
         type: "object",
         properties: {
-            c: {
-                type: "string"
-            },
             t: {
                 type: "string"
             }
         },
-        required: ["c", "t"],
+        required: ["t"],
         additionalProperties: false
     }
 
@@ -156,21 +153,27 @@ function buildBatchTranslationPrompt({items, sourceLanguage, targetLanguage}){
     const target = getLanguageName(targetLanguage)
     const compactItems = items.map(item => [item.index, item.text])
 
-     return `
+    return `
         Translate manga OCR text from ${source} to ${target}.
 
         All items are from the same manga page.
         Use neighboring items as context, but translate each item independently.
 
+        The input comes from OCR and may contain minor recognition errors.
+        Infer only unquestionably obvious OCR mistakes while translating.
+        Do not rewrite or return the source text.
+
         Rules:
         - Preserve meaning and tone.
         - Preserve slang, profanity and adult language.
         - Preserve names and proper nouns.
-        - Correct only obvious OCR errors.
+        - Translate the COMPLETE content of every item from beginning to end.
+        - Never shorten, summarize, abbreviate or omit any clause.
+        - If an item contains multiple phrases or sentences, translate all of them.
+        - Every meaningful part of the source must be represented in "t".
         - Never invent text.
         - Never merge or reorder items.
-        - "c" must remain in ${source}.
-        - "t" must be the ${target} translation.
+        - "t" must be the complete ${target} translation.
         - "t" must not be empty.
 
         Input format:
@@ -186,8 +189,7 @@ function buildBatchTranslationPrompt({items, sourceLanguage, targetLanguage}){
         Each input index is already defined as a key in the required structured output.
 
         For each key:
-        - "c" = corrected source-language OCR text
-        - "t" = ${target} translation
+        - "t" = complete ${target} translation
 
         Do not invent indexes.
         Do not omit indexes.
@@ -389,16 +391,13 @@ export async function translateBatchWithOllama({items, sourceLanguage="jpn",targ
     const normalizedItems = validItems.map(sourceItem => {
         const key = String(sourceItem.index)
         const translated = outputItems[key]
-        const correctedText = typeof translated?.c === "string" && translated.c.trim()
-            ? translated.c.trim()
-            : sourceItem.text
         const translation = typeof translated?.t === "string"
             ? translated.t.trim()
             : ""
-    
+
         return {
             index: sourceItem.index,
-            correctedText,
+            correctedText: sourceItem.text,
             translation,
             corrections: [],
             needsFallback: !translated || !translation
@@ -418,8 +417,7 @@ export async function translateBatchWithOllama({items, sourceLanguage="jpn",targ
         doneReason: data.done_reason,
         rawOutputItems: Object.entries(outputItems).map(([index, item]) => ({
             i: Number(index),
-            hasCorrected: Boolean(item?.c?.trim()),
-            hasTranslation: Boolean(item?.t?.trim())
+            translation: item?.t || ""
         }))
     }
 
