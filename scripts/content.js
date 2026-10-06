@@ -1,4 +1,4 @@
-import { loadComicTextDetector, runComicTextDetector, cropTextBlocks, loadImage, preprocessImage, renderTranslationOverImage, createSegmentationMask, estimateBackgroundColor, measureBackgroundDeviation, analizeBlackgroundDominance, detectTextContainer, floodFillTextContainer, translationBoxFromFloodRegion, growFreeTextBox } from "./manga/comicTextDetector"
+import { loadComicTextDetector, runComicTextDetector, cropTextBlocks, loadImage, preprocessImage, renderTranslationOverImage, createSegmentationMask, estimateBackgroundColor, measureBackgroundDeviation, analizeBlackgroundDominance, detectTextContainer, floodFillTextContainer, translationBoxFromFloodRegion, growFreeTextBox, translationBoxFromContainerAnalysis } from "./manga/comicTextDetector"
 
 const OCR_DEBUG = {events: []}
 
@@ -989,11 +989,14 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
             debugOCR(`Crop ${item.index} - flood: `, item.floodRegion)
 
+            const containerTranslationBox = translationBoxFromContainerAnalysis(item.containerAnalysis, item.box)
             const floodTranslationBox = translationBoxFromFloodRegion(item.floodRegion, item.box)
 
-            if(floodTranslationBox){
+            const safeTranslationBox = containerTranslationBox || floodTranslationBox
+
+            if(safeTranslationBox){
                 item.layoutType = "container"
-                item.translationBox = floodTranslationBox
+                item.translationBox = safeTranslationBox
             }else{
                 item.layoutType = "freeText"
 
@@ -1009,7 +1012,7 @@ async function processMangaImage(imageElement, imageIndex, generation) {
             
             debugOCR(`Crop ${item.index} - translationBox: `, {
                 layoutType: item.layoutType,
-                source: floodTranslationBox ? "flood" : "freeTextGrow",
+                source: containerTranslationBox ? "containerScan" : floodTranslationBox ? "flood" : "freeTextGrow",
                 original: item.box,
                 expanded: item.translationBox
             })

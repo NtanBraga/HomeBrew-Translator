@@ -347,12 +347,58 @@ export function floodFillTextContainer(sourceData, maskData, imageWidth, imageHe
     }
 }
 
+export function translationBoxFromContainerAnalysis(containerAnalysis, originalBox, options = {}){
+    if(!containerAnalysis?.enclosed) return null
+
+    const {expansionFactor = 0.60} = options
+
+    function getMinDistance(side){
+        const distance = side?.distances?.filter(distance => Number.isFinite(distance)) || []
+
+        if(distance.length === 0) return null
+
+        return Math.min(...distance)
+    }
+
+    const leftDistance = getMinDistance(containerAnalysis.sides?.left)
+    const rightDistance = getMinDistance(containerAnalysis.sides?.right)
+    const topDistance = getMinDistance(containerAnalysis.sides?.top)
+    const bottomDistance = getMinDistance(containerAnalysis.sides?.bottom)
+
+    const expandLeft = leftDistance !== null ? leftDistance * expansionFactor : 0
+    const expandRight = rightDistance !== null ? rightDistance * expansionFactor : 0
+    const expandTop = topDistance !== null ? topDistance * expansionFactor : 0
+    const expandBottom = bottomDistance !== null ? bottomDistance * expansionFactor : 0
+
+    const x1 = originalBox.x1 - expandLeft
+    const y1 = originalBox.y1 - expandTop
+    const x2 = originalBox.x2 + expandRight
+    const y2 = originalBox.y2 + expandBottom
+
+    const width = x2 - x1
+    const height = y2 - y1
+
+    if(width <= 0 || height <= 0) return null
+
+    return{
+        x1,
+        y1,
+        x2,
+        y2,
+        width,
+        height
+    }
+}
+
 export function translationBoxFromFloodRegion(region, originalBox, options = {}){
     if(!region?.valid) return null
 
-    const { paddingRatioX = 0.08, paddingRatioY = 0.08, minPadding = 4} = options
+    const { paddingRatioX = 0.08, paddingRatioY = 0.08, tallPaddingRatioX = 0.15, minPadding = 4} = options
 
-    const paddingX = Math.max(minPadding, Math.round(region.width * paddingRatioX))
+    const aspectRatio = region.height / Math.max(1, region.width)
+    const effectivePaddingRatioX = aspectRatio >= 1.25 ? Math.max(paddingRatioX, tallPaddingRatioX) : paddingRatioX
+
+    const paddingX = Math.max(minPadding, Math.round(region.width * effectivePaddingRatioX))
     const paddingY = Math.max(minPadding, Math.round(region.height * paddingRatioY))
 
     const x1 = region.x1 + paddingX
