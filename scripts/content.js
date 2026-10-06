@@ -654,7 +654,9 @@ async function recognizeAndTranslateCrops(crops){
                         evalCount: result.evalCount,
                         items: result.items?.length,
                         rawItems: result.rawItemCount,
-                        fallbackCount: result.fallbackCount
+                        fallbackCount: result.fallbackCount,
+                        doneReason: result.doneReason,
+                        rawOutput: result.rawOutputItems
                     })
                     return result
                 })

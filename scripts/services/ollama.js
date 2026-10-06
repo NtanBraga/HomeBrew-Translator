@@ -51,35 +51,6 @@ const OLLAMA_CONFIG = {
     numCtx: 1024
 }
 
-const BATCH_TRANSLATION_SCHEMA = {
-    type: "object",
-    properties: {
-        items: {
-            type: "array",
-            items: {
-                type: "object",
-                properties: {
-                    i: {
-                        type: "integer"
-                    },
-                    c: {
-                        type: "string"
-                    },
-                    t: {
-                        type: "string"
-                    },
-                },
-                required: [
-                    "i",
-                    "c",
-                    "t"
-                ]
-            }
-        }
-    },
-    required: ["items"]
-}
-
 let warmupPromise = null
 
 function getLanguageName(language){
@@ -141,6 +112,45 @@ function buildTranslationPrompt({
     `.trim()
 }
 
+function buildBatchTranslationSchema(items){
+    const itemSchema = {
+        type: "object",
+        properties: {
+            c: {
+                type: "string"
+            },
+            t: {
+                type: "string"
+            }
+        },
+        required: ["c", "t"],
+        additionalProperties: false
+    }
+
+    const properties = {}
+    const required = []
+
+    for(const item of items){
+        const key = String(item.index)
+        properties[key] = itemSchema
+        required.push(key)
+    }
+
+    return {
+        type: "object",
+        properties: {
+            items: {
+                type: "object",
+                properties,
+                required,
+                additionalProperties: false
+            }
+        },
+        required: ["items"],
+        additionalProperties: false
+    }
+}
+
 function buildBatchTranslationPrompt({items, sourceLanguage, targetLanguage}){
     const source = getLanguageName(sourceLanguage)
     const target = getLanguageName(targetLanguage)
@@ -159,7 +169,6 @@ function buildBatchTranslationPrompt({items, sourceLanguage, targetLanguage}){
         - Correct only obvious OCR errors.
         - Never invent text.
         - Never merge or reorder items.
-        - Return every input index exactly once.
         - "c" must remain in ${source}.
         - "t" must be the ${target} translation.
         - "t" must not be empty.
@@ -170,10 +179,20 @@ function buildBatchTranslationPrompt({items, sourceLanguage, targetLanguage}){
         Input:
         ${JSON.stringify(compactItems)}
 
-        Output fields:
-        i = original index
-        c = corrected source-language OCR text
-        t = translation
+        Output format:
+
+        "items" is an object.
+
+        Each input index is already defined as a key in the required structured output.
+
+        For each key:
+        - "c" = corrected source-language OCR text
+        - "t" = ${target} translation
+
+        Do not invent indexes.
+        Do not omit indexes.
+        Do not change the keys.
+        Fill every required item.
 
         Return only the structured response.
     `.trim()
@@ -334,7 +353,7 @@ export async function translateBatchWithOllama({items, sourceLanguage="jpn",targ
             content: prompt
         }],
         stream: false,
-        format: BATCH_TRANSLATION_SCHEMA,
+        format: buildBatchTranslationSchema(validItems),
         keep_alive: OLLAMA_CONFIG.keepAlive,
         options: {
             temperature: 0.1,
@@ -342,7 +361,7 @@ export async function translateBatchWithOllama({items, sourceLanguage="jpn",targ
             top_k: 20,
             repeat_penalty: 1.05,
             num_ctx: OLLAMA_CONFIG.numCtx,
-            num_predict: 384
+            num_predict: 512
         }
     }
     const response = await ollamaFetch("/api/chat", {
@@ -364,12 +383,12 @@ export async function translateBatchWithOllama({items, sourceLanguage="jpn",targ
         throw new Error("Ollama returned invalid batch JSON")
     }
 
-    const outputItems = Array.isArray(result.items) ? result.items : []
-
-    const byIndex = new Map(outputItems.map(item => [Number(item.i), item]))
+    const outputItems = result.items && typeof result.items === "object" && !Array.isArray(result.items)
+        ? result.items : {}
 
     const normalizedItems = validItems.map(sourceItem => {
-        const translated = byIndex.get(sourceItem.index)
+        const key = String(sourceItem.index)
+        const translated = outputItems[key]
         const correctedText = typeof translated?.c === "string" && translated.c.trim()
             ? translated.c.trim()
             : sourceItem.text
@@ -394,8 +413,14 @@ export async function translateBatchWithOllama({items, sourceLanguage="jpn",targ
         promptEvalDuration: data.prompt_eval_duration,
         evalDuration: data.eval_duration,
         evalCount: data.eval_count,
-        rawItemCount: outputItems.length,
-        fallbackCount: normalizedItems.filter(item => item.needsFallback).length
+        rawItemCount: Object.keys(outputItems).length,
+        fallbackCount: normalizedItems.filter(item => item.needsFallback).length,
+        doneReason: data.done_reason,
+        rawOutputItems: Object.entries(outputItems).map(([index, item]) => ({
+            i: Number(index),
+            hasCorrected: Boolean(item?.c?.trim()),
+            hasTranslation: Boolean(item?.t?.trim())
+        }))
     }
 
 }
