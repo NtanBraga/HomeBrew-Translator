@@ -12,6 +12,10 @@ let mangaImageSequence = 0
 
 const waitingImages = new WeakSet()
 
+//cache
+
+const MANGA_CACHE_VERSION = "manga-v1"
+
 //batch for ollama
 
 const OLLAMA_BATCH_SIZE = 5
@@ -268,6 +272,93 @@ async function getTranslationSettings(){
         sourceLanguage: settings.langFrom || "jpn",
         targetLanguage: settings.langTo || "eng"
     }
+}
+
+//cache
+
+async function getCachedMangaTranslation({imageHash, sourceLanguage, targetLanguage}){
+    const response = await chrome.runtime.sendMessage({
+        type: "MANGA_CACHE_GET",
+        payload: {
+            imageHash,
+            sourceLanguage,
+            targetLanguage,
+            cacheVersion: MANGA_CACHE_VERSION
+        }
+    })
+
+    if(!response?.ok) throw new Error(response?.error || "Falha lendo manga cache")
+
+    return (response.result || null)
+}
+
+async function setCachedMangaTranslation({imageHash, sourceLanguage, targetLanguage, imageWidth, imageHeight, translatedCrops, restorationDataUrl}){
+    const response = await chrome.runtime.sendMessage({
+        type: "MANGA_CACHE_SET",
+        payload: {
+            imageHash,
+            sourceLanguage,
+            targetLanguage,
+            cacheVersion: MANGA_CACHE_VERSION,
+            imageWidth,
+            imageHeight,
+            translatedCrops,
+            restorationDataUrl
+        }
+    })
+
+    if(!response?.ok) throw new Error(response?.error || "Falha salvando manga cache")
+
+    return response.result
+}
+
+function createCachedTranslationItems(translatedCrops){
+    return translatedCrops.filter(item => item.translation?.trim()).map(item => ({
+        index: item.index,
+        text: item.text || "",
+        correctedText: item.correctedText || item.text || "",
+        translation: item.translation,
+        box: item.box,
+        translationBox: item.translationBox,
+        layoutType: item.layoutType,
+        backgroundAnalysis: item.backgroundAnalysis
+    }))
+}
+
+function canvasToDataUrl(canvas){
+    return new Promise((resolve, reject) => {
+        canvas.toBlob(blob => {
+            if(!blob){
+                reject(new Error("Falha covnertendo restorationCanvas"))
+                return
+            }
+            const reader = new FileReader()
+
+            reader.onload = () => {
+                resolve(reader.result)
+            }
+            reader.onerror = () => {
+                reject(reader.error || new Error("Falha lendo PNG do cache"))
+            }
+            reader.readAsDataURL(blob)
+        }, "image/png")
+    })
+}
+
+async function dataUrlToCanvas(dataUrl){
+    const image = await loadImage(dataUrl)
+    const canvas = document.createElement("canvas")
+    
+    canvas.width = image.naturalWidth
+    canvas.height = image.naturalHeight
+    
+    const context = canvas.getContext("2d")
+
+    if(!context) throw new Error("Não foi possivel reconstruir canvas do cache")
+
+    context.drawImage(image, 0, 0)
+
+    return canvas
 }
 
 // find image candidate
@@ -586,8 +677,8 @@ async function requestMangaInpaint(imageCanvas, maskCanvas){
     return response.image
 }
 
-async function recognizeAndTranslateCrops(crops){
-    const {sourceLanguage,targetLanguage} = await getTranslationSettings()
+async function recognizeAndTranslateCrops(crops, translationSettings = null){
+    const {sourceLanguage,targetLanguage} = translationSettings || await getTranslationSettings()
 
     
 
@@ -851,29 +942,28 @@ async function fetchPageImageasDataUrl(imageElement){
         url
     })
 
-    if(!response?.ok){
-        throw new Error(response?.error || `Não foi possivel buscar imagem: ${url}`)
-    }
+    if(!response?.ok) throw new Error(response?.error || `Não foi possivel buscar imagem: ${url}`)
+    
 
-    return response.dataUrl
+    if(!response.imageHash) throw new Error("Background não retornou hash da imagem")
+
+    return {
+        dataUrl:response.dataUrl,
+        imageHash: response.imageHash 
+    }
 }
 
-async function preparePageImage(imageElement){
+async function preparePageImage(imageElement, fetchedImage){
     const totalStart = performance.now()
 
-    const fetchStart = performance.now()
-    const dataUrl = await fetchPageImageasDataUrl(imageElement)
-    const fetchEnd = performance.now()
-
     const loadStart = performance.now()
-    const image = await loadImage(dataUrl)
+    const image = await loadImage(fetchedImage.dataUrl)
     const loadEnd = performance.now()
 
     const preprocessStart = performance.now()
     const preprocess = preprocessImage(image)
     const preprocessEnd = performance.now()
 
-    debugOCR("[CTD] fetch: ", `${(fetchEnd - fetchStart).toFixed(1)} ms`)
     debugOCR("[CTD] load image: ", `${(loadEnd - loadStart).toFixed(1)} ms`)
     debugOCR("[CTD] preprocess: ", `${(preprocessEnd - preprocessStart).toFixed(1)} ms`)
     debugOCR("[CTD] prepare total: ", `${(performance.now() - totalStart).toFixed(1)} ms`)
@@ -881,6 +971,7 @@ async function preparePageImage(imageElement){
     return{
         imageElement,
         image,
+        imageHash: fetchedImage.imageHash,
         ...preprocess
     }
 }
@@ -891,12 +982,80 @@ async function processMangaImage(imageElement, imageIndex, generation) {
     try{
         imageElement.dataset.homebrewOcrStatus = "processing"
 
-        const preprocess = await preparePageImage(imageElement)
+        const translationSettings = await getTranslationSettings()
+        const fetchStartedAt = performance.now() 
+        const fetchedImage = await fetchPageImageasDataUrl(imageElement)
+
+        debugOCR(`[CTD] fetch: ${(performance.now() - fetchStartedAt).toFixed(1)} ms`)
 
         if(generation !== translationGeneration) return
 
+        let cachedTranslation = null
 
-        const detection = await ctdPool.run(() => runComicTextDetector(preprocess.tensor, preprocess.transform))
+        try{
+            cachedTranslation = await getCachedMangaTranslation({
+                imageHash: fetchedImage.imageHash,
+                sourceLanguage: translationSettings.sourceLanguage,
+                targetLanguage: translationSettings.targetLanguage
+            })
+        }catch(e){
+            debugOCRError(`Erro lendo cache imagem ${imageIndex} `, e)
+        }
+
+        if(cachedTranslation){
+            const dimensionsMatch = cachedTranslation.imageWidth === imageElement.naturalWidth 
+            && cachedTranslation.imageHeight === imageElement.naturalHeight
+
+            if(dimensionsMatch){
+
+                try{
+                    debugOCR(`Cache HIT imagem ${imageIndex}`, {
+                        hash: fetchedImage.imageHash.slice(0, 12),
+                        ageMs: Date.now() - cachedTranslation.createdAt,
+                        expiresInMs: cachedTranslation.expiresAt - Date.now(),
+                        texts: cachedTranslation.translatedCrops?.length || 0
+                    })
+
+                    const restorationCanvas = await dataUrlToCanvas(cachedTranslation.restorationDataUrl)
+
+                    if(generation !== translationGeneration) return
+
+                    const overlayController = await renderTranslationOverImage(imageElement, cachedTranslation.translatedCrops, restorationCanvas)
+
+                    if(generation !== translationGeneration) {
+                        overlayController.destroy()
+                        return
+                    }
+
+                    mangaOverlayController.set(imageElement, overlayController)
+                    
+                    imageElement.dataset.homebrewOcrStatus = "translated"
+
+                    debugOCR(`Image ${imageIndex} restaurada do cache`)
+
+                    return
+
+                }catch(e){
+                    debugOCRError(`Cache HIT falhou imagem ${imageIndex}: usando pipeline normal`)
+                }
+
+            }else{
+                debugOCR(`Cache ignorado imagem ${imageIndex}: dimensões diferentes`)
+            }
+        }
+        debugOCR(`Cache MISS imagem ${imageIndex}: `, {
+            hash: fetchedImage.imageHash.slice(0, 12)
+        })
+
+        const preprocess = await preparePageImage(imageElement, fetchedImage)
+
+        if(generation !== translationGeneration) return
+
+        const detection = await ctdPool.run(async () => {
+
+            await loadComicTextDetector()
+            return runComicTextDetector(preprocess.tensor, preprocess.transform)
+        })
 
         if(generation !== translationGeneration) return
 
@@ -910,7 +1069,7 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
         const crops = cropTextBlocks(preprocess.image, detection.boxes)
         
-        const translatedCrops = await recognizeAndTranslateCrops(crops) 
+        const translatedCrops = await recognizeAndTranslateCrops(crops, translationSettings) 
 
         const baseMask = createSegmentationMask(detection.segmentation, preprocess.transform, 0.5)
         const fillMask = dilateMaskCanvas(baseMask, 2)
@@ -1070,13 +1229,37 @@ async function processMangaImage(imageElement, imageIndex, generation) {
 
             restorationContext.drawImage(result.image, result.region.crop.x, result.region.crop.y, result.region.crop.width, result.region.crop.height)
         }
-        
-
-        if(generation !== translationGeneration) return
 
         const overlayController = await renderTranslationOverImage(imageElement, translatedCrops, restorationCanvas)
 
+        if(generation !== translationGeneration){
+            overlayController.destroy()
+            return
+        }
+
         mangaOverlayController.set(imageElement, overlayController)
+
+        try{
+            const restorationDataUrl = await canvasToDataUrl(restorationCanvas)
+            const cachedItems = createCachedTranslationItems(translatedCrops)
+            const saved = await setCachedMangaTranslation({
+                imageHash: fetchedImage.imageHash,
+                sourceLanguage: translationSettings.sourceLanguage,
+                targetLanguage: translationSettings.targetLanguage,
+                imageWidth: preprocess.image.naturalWidth,
+                imageHeight: preprocess.image.naturalHeight,
+                translatedCrops: cachedItems,
+                restorationDataUrl
+            })
+            debugOCR(`Cache salvo imagem ${imageIndex}: `, {
+                hash: fetchedImage.imageHash.slice(0,12),
+                texts: cachedItems.length,
+                expiresInMs: saved.expiresAt - Date.now()
+            })
+        }catch(e){
+            debugOCRError(`Erro salvando cache imagem ${imageIndex} `, e)
+        }
+
 
         imageElement.dataset.homebrewOcrStatus = "translated"
         
@@ -1105,16 +1288,8 @@ async function startMangaTranslation(){
 
     translationRunning = true
 
-    const generation = ++ translationGeneration
-
     try{
         debugOCR("Iniciando modo manga")
-
-        const session = await loadComicTextDetector()
-
-        if(generation !== translationGeneration) return
-
-        debugOCR("CTD pronto:", session.inputNames)
 
         startMangaMutationObserver()
 

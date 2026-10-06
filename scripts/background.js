@@ -1,4 +1,5 @@
 import './hot-take.js'
+import { clearMangaTranslationCache, getMangaTranslationCache, setMangaTranslationCache } from './services/cache.js'
 
 import { translateWithOllama,isOllamaAvailable,isTranslationModelInstalled, warmUpTranslationModel, unloadTranslationModel, translateBatchWithOllama } from './services/ollama'
 
@@ -38,6 +39,12 @@ function arrayBufferToBase64(buffer){
     return btoa(binary)
 }
 
+async function sha256Hex(buffer){
+    const digest = await crypto.subtle.digest("SHA-256", buffer)
+
+    return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join("")
+}
+
 async function fetchImageForOCR(url){
     const parsed = new URL(url)
 
@@ -55,9 +62,10 @@ async function fetchImageForOCR(url){
     if(!contentType.startsWith("image/")) throw new Error(`Unexpected content type: ${contentType}`)
 
     const buffer = await response.arrayBuffer()
+    const imageHash = await sha256Hex(buffer)
     const base64 = arrayBufferToBase64(buffer)
     
-    return (`data:${contentType};base64,${base64}`)
+    return {dataUrl: `data:${contentType};base64,${base64}`, imageHash}
 }
 
 async function recognizeMangaImage(image){
@@ -145,14 +153,77 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if(message?.type === "FETCH_IMAGE_FOR_OCR"){
         ;(async () => {
             try{
-                const dataUrl = await fetchImageForOCR(message.url)
+                const result = await fetchImageForOCR(message.url)
 
                 sendResponse({
                     ok: true,
-                    dataUrl
+                    dataUrl: result.dataUrl,
+                    imageHash: result.imageHash
                 })
             }catch(e){
                 console.error("OCR image fetch failed: ", e)
+
+                sendResponse({
+                    ok: false,
+                    error: e?.message || String(e)
+                })
+            }
+        })()
+        return true
+    }
+
+    if(message?.type === "MANGA_CACHE_GET") {
+        ;(async () => {
+            try{
+                const result = await getMangaTranslationCache(message.payload)
+
+                sendResponse({
+                    ok: true,
+                    result
+                })
+            }catch(e){
+                console.error("Manga cache get failed: ", e)
+
+                sendResponse({
+                    ok: false,
+                    error: e?.message || String(e)
+                })
+            }
+        })()
+        return true
+    }
+
+    if(message?.type === "MANGA_CACHE_SET") {
+        ;(async () => {
+            try{
+                const result = await setMangaTranslationCache(message.payload)
+
+                sendResponse({
+                    ok: true,
+                    result
+                })
+            }catch(e){
+                console.error("Manga cache set failed: ", e)
+
+                sendResponse({
+                    ok: false,
+                    error: e?.message || String(e)
+                })
+            }
+        })()
+        return true
+    }
+
+    if(message?.type === "MANGA_CACHE_CLEAR") {
+        ;(async () => {
+            try{
+                await clearMangaTranslationCache()
+
+                sendResponse({
+                    ok: true
+                })
+            }catch(e){
+                console.error("Manga cache clear failed: ", e)
 
                 sendResponse({
                     ok: false,
