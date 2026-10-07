@@ -364,27 +364,69 @@ async function dataUrlToCanvas(dataUrl){
 // find image candidate
 
 function isMangaImageCandidate(image){
-    if(!(image instanceof HTMLImageElement)) return false
+    if(!image instanceof HTMLImageElement) return false
 
     const src = image.currentSrc || image.src
 
     if(!src) return false
 
-    if(!src.startsWith("http://") && !src.startsWith("https://")) return false
+    if(!src.startsWith("https://") && !src.startsWith("http://")) return false
 
-    if(!image.complete) return false
+    const naturalWidth = image.naturalWidth
+    const naturalHeight = image.naturalHeight
 
-    if(image.naturalWidth < 300 || image.naturalHeight < 300) return false
+    if(naturalWidth < 300 || naturalHeight < 500) return false
 
     const rect = image.getBoundingClientRect()
+
     if(rect.width <= 0 || rect.height <= 0) return false
+
+    const naturalAspect = naturalWidth / naturalHeight
+    const renderAspect = rect.width / rect.height
+
+    const looksPortrait = naturalAspect <= 1.15
+
+    const looksLikeLargeSpread = 
+        naturalAspect > 1.15 &&
+        naturalWidth >= 1200 &&
+        naturalHeight >= 700 &&
+        rect.width >= Math.min(window.innerWidth * 0.70, 700)
+
+
+    if(!looksPortrait && !looksLikeLargeSpread) return false
+
+    const renderedArea = rect.width * rect.height
+
+    if(renderedArea < 120000) return false
+
+    const semanticText = [
+        image.alt,
+        image.title,
+        image.className,
+        image.id,
+        image.parentElement?.className,
+        image.parentElement?.id
+    ].filter(Boolean).join(" ").toLowerCase()
+
+    const thumbnailHints = [
+        "thumbnail",
+        "thumb",
+        "preview",
+        "poster",
+        "avatar",
+        "profile",
+        "icon",
+        "logo"
+    ]
+
+    if(thumbnailHints.some(hint => semanticText.includes(hint))) return false
 
     const status = image.dataset.homebrewOcrStatus
 
     if(status === "queued" || status === "processing" || status === "translated") return false
 
-    return true
 
+    return true
 }
 
 function createTaskPool(limit){
@@ -443,7 +485,7 @@ function enqueueMangaImage(imageElement){
     
     imageElement.dataset.homebrewOcrStatus = "queued"
 
-    debugOCR(`Imagem ${imageIndex} adicinada a fila`)
+    debugOCR(`Imagem ${imageIndex + 1} adicinada a fila`)
 
     mangaImagePool.run(async () => {
         if(generation !== translationGeneration) return
@@ -515,18 +557,6 @@ function stopMangaMutationObserver(){
     mangaMutationObserver.disconnect()
 
     mangaMutationObserver = null
-}
-
-function findPageImageCandidates(){
-    const candidates = Array.from(document.images).filter(isMangaImageCandidate)
-
-    candidates.sort((a,b) => {
-        const areaA = a.naturalWidth * a.naturalHeight
-        const areaB = b.naturalWidth * b.naturalHeight
-
-        return areaB - areaA
-    })
-    return candidates
 }
 
 function dilateMaskCanvas(maskCanvas, radius = 2){
@@ -1293,12 +1323,11 @@ async function startMangaTranslation(){
 
         startMangaMutationObserver()
 
-        const candidates = findPageImageCandidates()
+        const images = Array.from(document.images)
+        debugOCR("Imagens candidatas: ", images.length)
 
-        debugOCR("Imagens candidatas: ", candidates.length)
-
-        for(const image of candidates){
-            enqueueMangaImage(image)
+        for(const image of images){
+            handlePotentialMangaImage(image)
         }
 
         debugOCR("Processamento Manga concluido.")
